@@ -15,6 +15,10 @@ ADRs use an immutable four-digit sequence and a short descriptive slug:
 
 Numbers are never reused, even when a proposal is rejected.
 
+Backlog identifiers such as `ADR-006` in `CONTRIBUTOR_TASKS.md` are planning
+task identifiers and do not reserve an ADR file number. The permanent sequence
+is assigned when the ADR document is created.
+
 ## Status lifecycle
 
 ```text

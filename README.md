@@ -59,6 +59,7 @@ be versioned in the repository alongside the implementation.
 - [Domain glossary](docs/glossary.md)
 - [Architecture decisions](docs/adr/README.md)
 - [System threat model](docs/threat-model/system.md)
+- [Test data policy](docs/testing/test-data-policy.md)
 - [Development guide](docs/development.md)
 - [Contributor tasks](CONTRIBUTOR_TASKS.md)
 
