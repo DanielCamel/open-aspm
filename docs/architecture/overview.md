@@ -7,6 +7,12 @@ baseline, not a compatibility promise. Significant decisions must be recorded
 as Architecture Decision Records (ADRs) before their implementation is treated
 as stable.
 
+Related design documents:
+
+- [Domain glossary](../glossary.md)
+- [Architecture Decision Records](../adr/README.md)
+- [System threat model](../threat-model/system.md)
+
 Open ASPM is currently pre-alpha. The first goal is a trustworthy vertical
 slice from report ingestion to an explainable finding, not a broad collection
 of partially implemented integrations.

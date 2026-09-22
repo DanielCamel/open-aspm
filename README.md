@@ -56,6 +56,9 @@ Architecture, threat model, integration contracts, and API documentation will
 be versioned in the repository alongside the implementation.
 
 - [Architecture overview](docs/architecture/overview.md)
+- [Domain glossary](docs/glossary.md)
+- [Architecture decisions](docs/adr/README.md)
+- [System threat model](docs/threat-model/system.md)
 - [Development guide](docs/development.md)
 - [Contributor tasks](CONTRIBUTOR_TASKS.md)
 
