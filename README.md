@@ -42,12 +42,18 @@ issues will be added as the interfaces stabilize.
 Architecture, threat model, integration contracts, and API documentation will
 be versioned in the repository alongside the implementation.
 
+- [Architecture overview](docs/architecture/overview.md)
+- [Contributor tasks](CONTRIBUTOR_TASKS.md)
+
 ## Contributing
 
 Contributions and design feedback are welcome. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) and [GOVERNANCE.md](GOVERNANCE.md) before
 opening a pull request. By participating, you agree to follow our
 [Code of Conduct](CODE_OF_CONDUCT.md).
+
+New contributors can select a bounded task from
+[CONTRIBUTOR_TASKS.md](CONTRIBUTOR_TASKS.md).
 
 ## Security
 
