@@ -37,12 +37,26 @@ The architecture and domain model are under active design. The initial roadmap
 is tracked in [ROADMAP.md](ROADMAP.md). Public milestones and implementation
 issues will be added as the interfaces stabilize.
 
+## Development preview
+
+Open ASPM currently provides a minimal pre-alpha HTTP service. It does not yet
+ingest findings or expose an authenticated production API.
+
+```bash
+go run ./cmd/open-aspm version
+go run ./cmd/open-aspm server
+```
+
+See the [development guide](docs/development.md) for prerequisites, verification
+commands, and server options.
+
 ## Documentation
 
 Architecture, threat model, integration contracts, and API documentation will
 be versioned in the repository alongside the implementation.
 
 - [Architecture overview](docs/architecture/overview.md)
+- [Development guide](docs/development.md)
 - [Contributor tasks](CONTRIBUTOR_TASKS.md)
 
 ## Contributing
