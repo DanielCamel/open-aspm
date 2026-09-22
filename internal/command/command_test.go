@@ -71,6 +71,47 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunMigrateRequiresAction(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(
+		context.Background(),
+		[]string{"migrate"},
+		&stdout,
+		&stderr,
+		slog.New(slog.NewJSONHandler(&stderr, nil)),
+	)
+
+	if exitCode != exitUsage {
+		t.Fatalf("Run() exit code = %d, want %d", exitCode, exitUsage)
+	}
+	if !strings.Contains(stderr.String(), "migrate <up|status>") {
+		t.Fatalf("Run() stderr = %q, want migrate usage", stderr.String())
+	}
+}
+
+func TestRunMigrateRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("OPEN_ASPM_DATABASE_URL", "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(
+		context.Background(),
+		[]string{"migrate", "status"},
+		&stdout,
+		&stderr,
+		slog.New(slog.NewJSONHandler(&stderr, nil)),
+	)
+
+	if exitCode != exitUsage {
+		t.Fatalf("Run() exit code = %d, want %d", exitCode, exitUsage)
+	}
+	if !strings.Contains(stderr.String(), "OPEN_ASPM_DATABASE_URL is required") {
+		t.Fatalf("Run() stderr = %q, want missing URL error", stderr.String())
+	}
+}
+
 func TestRunServerRejectsInvalidShutdownTimeout(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

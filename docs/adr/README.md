@@ -66,3 +66,12 @@ An ADR should include:
 - unresolved questions.
 
 Use [template.md](template.md) when proposing a decision.
+
+## Accepted decisions
+
+- [0001: Scan scope and reconciliation](0001-scan-scope-and-reconciliation.md)
+- [0002: Asset identity and alias history](0002-asset-identity-and-alias-history.md)
+- [0003: PostgreSQL job leasing](0003-postgresql-job-leasing.md)
+- [0004: Initial authorization model](0004-initial-authorization-model.md)
+- [0005: Raw artifact storage and retention](0005-raw-artifact-storage-and-retention.md)
+- [0006: PostgreSQL access and schema migrations](0006-postgresql-access-and-migrations.md)

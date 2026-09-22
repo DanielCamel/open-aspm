@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
+	"github.com/spectremi/open-aspm/internal/database"
 	"github.com/spectremi/open-aspm/internal/server"
 	"github.com/spectremi/open-aspm/internal/version"
 )
@@ -40,11 +42,66 @@ func Run(
 		return exitOK
 	case "server":
 		return runServer(ctx, args[1:], stderr, logger)
+	case "migrate":
+		return runMigrate(ctx, args[1:], stdout, stderr, logger)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		writeUsage(stderr)
 		return exitUsage
 	}
+}
+
+func runMigrate(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	logger *slog.Logger,
+) int {
+	if len(args) != 1 || (args[0] != "up" && args[0] != "status") {
+		_, _ = fmt.Fprintln(stderr, "Usage: open-aspm migrate <up|status>")
+		return exitUsage
+	}
+
+	databaseURL := os.Getenv("OPEN_ASPM_DATABASE_URL")
+	if databaseURL == "" {
+		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_DATABASE_URL is required")
+		return exitUsage
+	}
+	migrator, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		logger.Error("database migration failed", "error", err)
+		return exitFailure
+	}
+	defer func() {
+		if err := migrator.Close(); err != nil {
+			logger.Warn("database close failed", "error", err)
+		}
+	}()
+
+	if args[0] == "status" {
+		status, err := migrator.Status(ctx)
+		if err != nil {
+			logger.Error("database migration status failed", "error", err)
+			return exitFailure
+		}
+		_, _ = fmt.Fprintf(
+			stdout,
+			"database version: %d; target: %d; pending: %t\n",
+			status.Current,
+			status.Target,
+			status.Pending,
+		)
+		return exitOK
+	}
+
+	status, applied, err := migrator.Up(ctx)
+	if err != nil {
+		logger.Error("database migration failed", "error", err)
+		return exitFailure
+	}
+	_, _ = fmt.Fprintf(stdout, "database migrated: version %d; applied: %d\n", status.Current, applied)
+	return exitOK
 }
 
 func runServer(ctx context.Context, args []string, stderr io.Writer, logger *slog.Logger) int {
@@ -94,9 +151,11 @@ Usage:
   open-aspm <command> [options]
 
 Commands:
+  migrate   Inspect or apply PostgreSQL schema migrations
   server    Run the HTTP server
   version   Print build version information
   help      Show this help
 
-Run "open-aspm server --help" for server options.`)
+Run "open-aspm server --help" for server options.
+Set OPEN_ASPM_DATABASE_URL before running migration commands.`)
 }

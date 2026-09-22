@@ -5,9 +5,9 @@
 - Go 1.26 or a newer supported Go release
 - Git
 
-The module does not currently depend on external Go packages or runtime
-services. With the default Go toolchain behavior, an older local `go` command
-may download a compatible toolchain declared by `go.mod`.
+PostgreSQL is required for migration integration tests and will be required by
+the application runtime. With the default Go toolchain behavior, an older local
+`go` command may download a compatible toolchain declared by `go.mod`.
 
 ## Build and verify
 
@@ -22,6 +22,31 @@ binary. Run `make test-race` before submitting concurrency-sensitive changes.
 Use `make format` to apply Go formatting.
 
 Generated binaries belong in `bin/`, which is ignored by Git.
+
+## PostgreSQL migrations
+
+Schema migrations are embedded in the binary and run explicitly:
+
+```bash
+export OPEN_ASPM_DATABASE_URL='postgres://open_aspm_migration:password@localhost/open_aspm?sslmode=require'
+go run ./cmd/open-aspm migrate status
+go run ./cmd/open-aspm migrate up
+```
+
+Use a schema-owner connection only for migration commands. The server runtime
+must use a separate, less-privileged role. See
+[ADR-0006](adr/0006-postgresql-access-and-migrations.md) for role and backup
+requirements.
+
+The integration test requires an isolated disposable PostgreSQL instance and an
+administrative URL that may create and drop temporary databases and roles:
+
+```bash
+OPEN_ASPM_TEST_DATABASE_ADMIN_URL='postgres://postgres:postgres@localhost/postgres?sslmode=disable' \
+  make test-integration
+```
+
+Never point this test at a shared or production-like database.
 
 ## Run locally
 
