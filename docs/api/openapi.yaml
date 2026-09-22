@@ -1,0 +1,837 @@
+openapi: 3.1.1
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Open ASPM Ingestion API
+  version: 1.0.0-alpha.1
+  summary: Version 1 contract for immutable security-report ingestion.
+  description: |
+    This contract reserves an import, streams one opaque report, starts
+    asynchronous processing, and exposes import and operation status.
+
+    All paths are workspace-scoped. Authentication alone never grants access;
+    each operation also requires the documented capability and application
+    scope. IDs are opaque and possession of an ID is not authorization.
+
+    The API is pre-alpha, but incompatible changes require a new path version.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: /api/v1
+    description: Same-origin API v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Imports
+    description: Raw report reservation, upload, and processing.
+  - name: Operations
+    description: Status of asynchronous work.
+
+paths:
+  /workspaces/{workspace_id}/imports:
+    post:
+      operationId: createImport
+      tags: [Imports]
+      summary: Reserve an import and upload slot
+      description: |
+        Requires `imports:create` for `application_id` in this workspace.
+
+        `Idempotency-Key` is scoped to the authenticated principal, workspace,
+        API operation, and API major version. The fingerprint is computed from
+        the validated request fields, so insignificant JSON formatting does not
+        change it. Replaying the same key and fingerprint for at least 24 hours
+        returns the original status, headers, and body. Reusing a key with a
+        different fingerprint returns `409`. A concurrent replay while the
+        first request is unresolved returns `409` and `Retry-After`.
+
+        The response selects the effective upload limit. No storage key or
+        backend location is exposed.
+      x-required-capabilities: [imports:create]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateImportRequest'
+            example:
+              application_id: app_01JQ7X2QW0NW6Y8ZC1H0V9F3KD
+              report_format:
+                name: sarif
+                version: 2.1.0
+              original_filename: results.sarif
+              expected_size_bytes: 48127
+              expected_sha256: 4f7f2e849fcb4517f07bca75f0cb56d042da07f86f9f86c34d828b8e25f0107a
+      responses:
+        '201':
+          description: Import and upload slot reserved.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Import'
+              example:
+                id: imp_01JQ7XA8P4K4BB6D63SX5N39EY
+                workspace_id: wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T
+                application_id: app_01JQ7X2QW0NW6Y8ZC1H0V9F3KD
+                state: awaiting_upload
+                report_format:
+                  name: sarif
+                  version: 2.1.0
+                original_filename: results.sarif
+                expected_size_bytes: 48127
+                expected_sha256: 4f7f2e849fcb4517f07bca75f0cb56d042da07f86f9f86c34d828b8e25f0107a
+                upload:
+                  max_bytes: 104857600
+                  expires_at: '2026-09-22T12:30:00Z'
+                created_at: '2026-09-22T12:00:00Z'
+                updated_at: '2026-09-22T12:00:00Z'
+                _links:
+                  self: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY
+                  content: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY/content
+                  complete: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY/complete
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /workspaces/{workspace_id}/imports/{import_id}:
+    get:
+      operationId: getImport
+      tags: [Imports]
+      summary: Get import state
+      description: |
+        Requires `imports:read-own`. The initial contract restricts this to the
+        principal that created the import. A resource outside the caller's
+        effective workspace or application scope is returned as `404`.
+      x-required-capabilities: [imports:read-own]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ImportId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Current import state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Import'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /workspaces/{workspace_id}/imports/{import_id}/content:
+    put:
+      operationId: uploadImportContent
+      tags: [Imports]
+      summary: Stream the report bytes
+      description: |
+        Requires `imports:upload` and ownership of the reserved import. The
+        request body is opaque and is streamed; the server must not buffer the
+        whole report in memory or PostgreSQL.
+
+        `Content-Length` is optional. If present and greater than `max_bytes`,
+        the server rejects the request before reading the body. Otherwise it
+        counts bytes while streaming and aborts with `413` as soon as the limit
+        is exceeded. Missing `Content-Length` never disables the limit.
+
+        The server computes SHA-256 over the exact stored bytes. It verifies
+        `expected_size_bytes` and `expected_sha256` when supplied. A mismatch
+        rejects the import with `422`. An interrupted request does not expose
+        partial content; the client may retry the entire PUT until `expires_at`.
+        After a successful upload, an identical retry returns the existing
+        receipt; a conflicting upload returns `409` and never replaces bytes.
+      x-required-capabilities: [imports:upload]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ImportId'
+        - $ref: '#/components/parameters/ContentLength'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {}
+      responses:
+        '200':
+          description: Exact report bytes were stored and verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadReceipt'
+              example:
+                import_id: imp_01JQ7XA8P4K4BB6D63SX5N39EY
+                state: uploaded
+                size_bytes: 48127
+                sha256: 4f7f2e849fcb4517f07bca75f0cb56d042da07f86f9f86c34d828b8e25f0107a
+                uploaded_at: '2026-09-22T12:01:14Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '408':
+          $ref: '#/components/responses/UploadTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /workspaces/{workspace_id}/imports/{import_id}/complete:
+    post:
+      operationId: completeImport
+      tags: [Imports]
+      summary: Commit the upload and start processing
+      description: |
+        Requires `imports:upload`. The server atomically makes the verified raw
+        artifact available for processing and queues an asynchronous operation.
+        No parser result is implied by this response.
+
+        Idempotency scope and retention are the same as `createImport`.
+        Replaying the same key returns the same operation. Completing before a
+        successful upload, or completing a terminal import, returns `409`.
+      x-required-capabilities: [imports:upload]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ImportId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '202':
+          description: Processing operation accepted.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              example:
+                id: op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                workspace_id: wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T
+                kind: import.process
+                state: queued
+                created_at: '2026-09-22T12:02:00Z'
+                updated_at: '2026-09-22T12:02:00Z'
+                _links:
+                  self: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/operations/op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                  import: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /workspaces/{workspace_id}/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      tags: [Operations]
+      summary: Get asynchronous operation status
+      description: |
+        Requires `imports:read-own` for the import associated with this
+        operation. Clients should honor `Retry-After` while the operation is
+        `queued` or `running`. Terminal states are `succeeded`, `failed`, and
+        `cancelled`. Operation IDs do not grant access.
+      x-required-capabilities: [imports:read-own]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/OperationId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Current operation state.
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                running:
+                  value:
+                    id: op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                    workspace_id: wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T
+                    kind: import.process
+                    state: running
+                    created_at: '2026-09-22T12:02:00Z'
+                    updated_at: '2026-09-22T12:02:03Z'
+                    _links:
+                      self: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/operations/op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                      import: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY
+                succeeded:
+                  value:
+                    id: op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                    workspace_id: wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T
+                    kind: import.process
+                    state: succeeded
+                    result:
+                      import_id: imp_01JQ7XA8P4K4BB6D63SX5N39EY
+                      import_state: succeeded
+                      scans_created: 2
+                    created_at: '2026-09-22T12:02:00Z'
+                    updated_at: '2026-09-22T12:02:07Z'
+                    finished_at: '2026-09-22T12:02:07Z'
+                    _links:
+                      self: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/operations/op_01JQ7XK4NYM6F6E1X61Z6S2EAM
+                      import: /api/v1/workspaces/wsp_01JQ7WZ8B6QJ45VQ2X8M9K1R0T/imports/imp_01JQ7XA8P4K4BB6D63SX5N39EY
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Open ASPM API token
+      description: |
+        A scoped service token or access token. Tokens are accepted only in the
+        Authorization header and must never be placed in a URI.
+
+  parameters:
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      description: Opaque workspace identifier.
+      schema:
+        $ref: '#/components/schemas/OpaqueId'
+    ImportId:
+      name: import_id
+      in: path
+      required: true
+      description: Opaque import identifier.
+      schema:
+        $ref: '#/components/schemas/OpaqueId'
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      description: Opaque asynchronous operation identifier.
+      schema:
+        $ref: '#/components/schemas/OpaqueId'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated opaque retry key. It must not contain credentials,
+        report data, repository names, or other sensitive information.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]+$'
+      example: 8e03978e-40d5-43e8-bc93-6894a57f9324
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: |
+        Optional caller correlation ID. The server validates and bounds it and
+        returns its own request identifier in problem responses.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    ContentLength:
+      name: Content-Length
+      in: header
+      required: false
+      description: Decimal byte length of the upload. Streaming without it is allowed.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+
+  headers:
+    Location:
+      description: URI reference for the created resource or accepted operation.
+      schema:
+        type: string
+        format: uri-reference
+    RetryAfter:
+      description: Seconds the client should wait before polling or retrying.
+      schema:
+        type: integer
+        minimum: 1
+
+  schemas:
+    OpaqueId:
+      type: string
+      minLength: 3
+      maxLength: 128
+      description: Opaque identifier; clients must not parse its representation.
+
+    CreateImportRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - application_id
+        - report_format
+      properties:
+        application_id:
+          $ref: '#/components/schemas/OpaqueId'
+        report_format:
+          $ref: '#/components/schemas/ReportFormat'
+        original_filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Display metadata only; never a storage key or filesystem path.
+        expected_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Optional exact byte count asserted by the client.
+        expected_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Optional lowercase SHA-256 asserted by the client and verified by the server.
+
+    ReportFormat:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          enum: [sarif]
+        version:
+          type: string
+          enum: [2.1.0]
+
+    Import:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - workspace_id
+        - application_id
+        - state
+        - report_format
+        - created_at
+        - updated_at
+        - _links
+      properties:
+        id:
+          $ref: '#/components/schemas/OpaqueId'
+        workspace_id:
+          $ref: '#/components/schemas/OpaqueId'
+        application_id:
+          $ref: '#/components/schemas/OpaqueId'
+        state:
+          $ref: '#/components/schemas/ImportState'
+        report_format:
+          $ref: '#/components/schemas/ReportFormat'
+        original_filename:
+          type: string
+        expected_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        expected_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Server-observed byte count, present after upload.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Server-computed digest, present after upload.
+        upload:
+          $ref: '#/components/schemas/UploadPolicy'
+        operation_id:
+          $ref: '#/components/schemas/OpaqueId'
+        failure:
+          $ref: '#/components/schemas/OperationFailure'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        _links:
+          $ref: '#/components/schemas/ImportLinks'
+
+    ImportState:
+      type: string
+      enum:
+        - awaiting_upload
+        - uploading
+        - uploaded
+        - queued
+        - processing
+        - succeeded
+        - failed
+        - rejected
+        - abandoned
+
+    UploadPolicy:
+      type: object
+      additionalProperties: false
+      required: [max_bytes, expires_at]
+      properties:
+        max_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        expires_at:
+          type: string
+          format: date-time
+
+    UploadReceipt:
+      type: object
+      additionalProperties: false
+      required: [import_id, state, size_bytes, sha256, uploaded_at]
+      properties:
+        import_id:
+          $ref: '#/components/schemas/OpaqueId'
+        state:
+          type: string
+          const: uploaded
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        uploaded_at:
+          type: string
+          format: date-time
+
+    Operation:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - workspace_id
+        - kind
+        - state
+        - created_at
+        - updated_at
+        - _links
+      properties:
+        id:
+          $ref: '#/components/schemas/OpaqueId'
+        workspace_id:
+          $ref: '#/components/schemas/OpaqueId'
+        kind:
+          type: string
+          const: import.process
+        state:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        result:
+          $ref: '#/components/schemas/ImportOperationResult'
+        failure:
+          $ref: '#/components/schemas/OperationFailure'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        _links:
+          $ref: '#/components/schemas/OperationLinks'
+
+    ImportOperationResult:
+      type: object
+      additionalProperties: false
+      required: [import_id, import_state, scans_created]
+      properties:
+        import_id:
+          $ref: '#/components/schemas/OpaqueId'
+        import_state:
+          type: string
+          const: succeeded
+        scans_created:
+          type: integer
+          minimum: 0
+
+    OperationFailure:
+      type: object
+      additionalProperties: false
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          pattern: '^[a-z][a-z0-9.-]*$'
+          description: Stable machine-readable failure code.
+        title:
+          type: string
+          description: Short stable summary.
+        detail:
+          type: string
+          description: Safe occurrence-specific guidance without internal details.
+
+    ImportLinks:
+      type: object
+      additionalProperties: false
+      required: [self]
+      properties:
+        self:
+          type: string
+          format: uri-reference
+        content:
+          type: string
+          format: uri-reference
+        complete:
+          type: string
+          format: uri-reference
+        operation:
+          type: string
+          format: uri-reference
+
+    OperationLinks:
+      type: object
+      additionalProperties: false
+      required: [self, import]
+      properties:
+        self:
+          type: string
+          format: uri-reference
+        import:
+          type: string
+          format: uri-reference
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details with stable Open ASPM extensions.
+      required: [type, title, status, code, request_id]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable problem type URI, currently `urn:open-aspm:problem:<code>`.
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          pattern: '^[a-z][a-z0-9.-]*$'
+          description: Stable machine-readable problem code.
+        request_id:
+          type: string
+          description: Server-generated identifier safe to provide to support.
+        errors:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ValidationError'
+
+    ValidationError:
+      type: object
+      additionalProperties: false
+      required: [detail, pointer]
+      properties:
+        detail:
+          type: string
+        pointer:
+          type: string
+          description: JSON Pointer into the request document.
+
+  responses:
+    BadRequest:
+      description: Malformed or invalid request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:open-aspm:problem:validation-failed
+            title: Request validation failed
+            status: 400
+            detail: One or more request fields are invalid.
+            code: validation-failed
+            request_id: req_01JQ7XX5D93J9GQE0VSC2KZHAH
+            errors:
+              - detail: must be one of the supported report formats
+                pointer: /report_format/name
+    Unauthenticated:
+      description: Authentication is missing or invalid.
+      headers:
+        WWW-Authenticate:
+          description: Bearer authentication challenge.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: The authenticated principal lacks a required capability.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource is absent or hidden by workspace/application scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UploadTimeout:
+      description: Upload deadline or minimum-progress requirement was exceeded.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: |
+        Resource state, idempotency fingerprint, or in-progress replay conflicts
+        with this request.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            idempotencyConflict:
+              value:
+                type: urn:open-aspm:problem:idempotency-key-conflict
+                title: Idempotency key reused for a different request
+                status: 409
+                code: idempotency-key-conflict
+                request_id: req_01JQ7Y1CVVKXJ8JV6GB4Q1PFKH
+            invalidState:
+              value:
+                type: urn:open-aspm:problem:invalid-import-state
+                title: Import is not ready for this operation
+                status: 409
+                detail: Upload report content before completing the import.
+                code: invalid-import-state
+                request_id: req_01JQ7Y3DTEYVFV9R45N2WZCH7P
+    ContentTooLarge:
+      description: Declared or observed report size exceeds the effective limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:open-aspm:problem:content-too-large
+            title: Report exceeds the upload limit
+            status: 413
+            detail: The effective limit for this import is 104857600 bytes.
+            code: content-too-large
+            request_id: req_01JQ7Y5E9AX5JD4V3YR6Q7C8BM
+    UnsupportedMediaType:
+      description: Upload content type is not supported.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableContent:
+      description: Stored byte count or SHA-256 does not match the reservation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: Request rate or upload concurrency limit was exceeded.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: Unexpected server failure with no internal details disclosed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unavailable:
+      description: Required service is temporarily unavailable.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
