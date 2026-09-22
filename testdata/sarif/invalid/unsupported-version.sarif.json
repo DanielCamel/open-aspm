@@ -1,0 +1,13 @@
+{
+  "$schema": "https://example.com/schemas/fictional-sarif-9.9.9.json",
+  "version": "9.9.9",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Open ASPM Synthetic Scanner"
+        }
+      }
+    }
+  ]
+}

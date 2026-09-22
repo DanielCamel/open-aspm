@@ -1,0 +1,139 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Open ASPM Synthetic SAST",
+          "version": "1.0.0",
+          "informationUri": "https://example.com/synthetic-scanner",
+          "rules": [
+            {
+              "id": "OA1001",
+              "name": "SyntheticInputValidation",
+              "shortDescription": {
+                "text": "Synthetic input reaches a demonstration sink"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "OA1002",
+              "name": "SyntheticUnsafeConfiguration",
+              "shortDescription": {
+                "text": "A demonstration setting is intentionally unsafe"
+              }
+            }
+          ]
+        }
+      },
+      "originalUriBaseIds": {
+        "%SRCROOT%": {
+          "uri": "file:///workspace/example-service/"
+        }
+      },
+      "artifacts": [
+        {
+          "location": {
+            "uri": "src/handler.go",
+            "uriBaseId": "%SRCROOT%"
+          },
+          "roles": [
+            "analysisTarget"
+          ]
+        },
+        {
+          "location": {
+            "uri": "src/config.go",
+            "uriBaseId": "%SRCROOT%"
+          },
+          "roles": [
+            "analysisTarget"
+          ]
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "OA1001",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "Synthetic data flow used only to exercise ingestion."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/handler.go",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 0
+                },
+                "region": {
+                  "startLine": 12,
+                  "startColumn": 3,
+                  "endLine": 12,
+                  "endColumn": 18
+                }
+              }
+            },
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/config.go",
+                  "uriBaseId": "%SRCROOT%",
+                  "index": 1
+                },
+                "region": {
+                  "startLine": 7,
+                  "startColumn": 2
+                }
+              }
+            }
+          ],
+          "fingerprints": {
+            "open-aspm/v1": "synthetic-fingerprint-001"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "synthetic-line-hash-001"
+          }
+        },
+        {
+          "ruleId": "OA1002",
+          "ruleIndex": 1,
+          "message": {
+            "text": "Optional level, locations, and fingerprints are deliberately absent."
+          }
+        }
+      ]
+    },
+    {
+      "tool": {
+        "driver": {
+          "name": "Open ASPM Synthetic SCA",
+          "semanticVersion": "2.1.0",
+          "rules": [
+            {
+              "id": "OA2001",
+              "name": "SyntheticDependencyAdvisory"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "OA2001",
+          "ruleIndex": 0,
+          "level": "note",
+          "message": {
+            "text": "A fictional dependency result for parser coverage."
+          },
+          "partialFingerprints": {
+            "packageIdentity": "pkg:generic/example-component@1.0.0"
+          }
+        }
+      ]
+    }
+  ]
+}
