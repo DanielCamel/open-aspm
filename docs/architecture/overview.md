@@ -14,6 +14,7 @@ Related design documents:
 - [System threat model](../threat-model/system.md)
 - [Test data policy](../testing/test-data-policy.md)
 - [Ingestion API v1 contract](../api/ingestion-v1.md)
+- [BlobStore implementation](../storage/blobstore.md)
 
 Open ASPM is currently pre-alpha. The first goal is a trustworthy vertical
 slice from report ingestion to an explainable finding, not a broad collection

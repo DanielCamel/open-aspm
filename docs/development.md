@@ -48,6 +48,11 @@ OPEN_ASPM_TEST_DATABASE_ADMIN_URL='postgres://postgres:postgres@localhost/postgr
 
 Never point this test at a shared or production-like database.
 
+BlobStore unit tests use temporary filesystem roots. The S3 adapter conformance
+suite requires a disposable S3-compatible service; see the
+[BlobStore implementation guide](storage/blobstore.md) for the command and
+safety requirements.
+
 ## Run locally
 
 ```bash

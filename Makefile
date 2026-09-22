@@ -1,7 +1,7 @@
 GO ?= go
 BINARY ?= bin/open-aspm
 
-.PHONY: build check fmt format test test-integration test-race vet
+.PHONY: build check fmt format test test-integration test-race test-s3-integration vet
 
 build:
 	mkdir -p $(dir $(BINARY))
@@ -23,6 +23,9 @@ test:
 
 test-integration:
 	$(GO) test -count=1 -tags=integration ./internal/database
+
+test-s3-integration:
+	$(GO) test -count=1 -tags=integration ./internal/blobstore/s3store
 
 test-race:
 	$(GO) test -race -count=1 ./...
