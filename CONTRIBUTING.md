@@ -19,6 +19,10 @@ Thank you for helping build Open ASPM.
 4. Explain security implications and any breaking changes.
 5. Ensure all automated checks pass and resolve review conversations.
 
+GitHub requires a maintainer to approve Actions for first-time contributors
+before workflows from a public fork can run. That approval only starts the
+repository's CI and CodeQL workflows; it is not approval of the contribution.
+
 Commits and pull requests must comply with the Apache License 2.0. By
 submitting a contribution, you certify that you have the right to submit it
 under that license.
