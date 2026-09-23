@@ -46,7 +46,7 @@ jobs:
         run: make test-race
 
   database:
-    name: PostgreSQL migrations
+    name: PostgreSQL migrations and queue
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -73,7 +73,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Verify migrations with non-superuser roles
+      - name: Verify migrations and queue semantics
         env:
           OPEN_ASPM_TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: make test-integration

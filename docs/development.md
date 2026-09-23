@@ -48,6 +48,20 @@ OPEN_ASPM_TEST_DATABASE_ADMIN_URL='postgres://postgres:postgres@localhost/postgr
 
 Never point this test at a shared or production-like database.
 
+The queue migration adds the minimal workspace isolation root plus internal
+job and attempt tables. After migrations, grant the runtime role only the DML
+needed by the queue implementation (substitute the deployment's role name):
+
+```sql
+GRANT SELECT ON open_aspm.workspaces TO open_aspm_runtime;
+GRANT SELECT, INSERT, UPDATE ON open_aspm.jobs TO open_aspm_runtime;
+GRANT SELECT, INSERT, UPDATE ON open_aspm.job_attempts TO open_aspm_runtime;
+```
+
+Queue payloads contain only bounded identifiers and metadata. Raw reports and
+credentials do not belong in queue rows. Lease-token plaintext is returned
+only to the acquiring worker and must be redacted from logs and telemetry.
+
 BlobStore unit tests use temporary filesystem roots. The S3 adapter conformance
 suite requires a disposable S3-compatible service; see the
 [BlobStore implementation guide](storage/blobstore.md) for the command and

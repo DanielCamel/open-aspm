@@ -3,7 +3,6 @@ package jobqueue
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -14,29 +13,42 @@ type workerQueueStub struct {
 	heartbeatErr      error
 	succeedErr        error
 	cancelActiveCalls int
+	failCalls         int
+	failure           Failure
+	availableAt       time.Time
 }
 
-func (*workerQueueStub) Acquire(context.Context, string, string, time.Duration) (Job, bool, error) {
-	return Job{}, false, nil
+func (*workerQueueStub) Acquire(context.Context, string, string, time.Duration, int) (Lease, bool, error) {
+	return Lease{}, false, nil
 }
 
-func (*workerQueueStub) Start(context.Context, string, string) error {
+func (*workerQueueStub) Start(context.Context, string, string, string) error {
 	return nil
 }
 
-func (queue *workerQueueStub) Heartbeat(context.Context, string, string, time.Duration) error {
+func (queue *workerQueueStub) Heartbeat(context.Context, string, string, string, time.Duration) error {
 	return queue.heartbeatErr
 }
 
-func (queue *workerQueueStub) Succeed(context.Context, string, string) error {
+func (queue *workerQueueStub) Succeed(context.Context, string, string, string) error {
 	return queue.succeedErr
 }
 
-func (*workerQueueStub) Fail(context.Context, string, string, Failure, time.Time) (State, error) {
-	return "", errors.New("unexpected Fail call")
+func (queue *workerQueueStub) Fail(
+	_ context.Context,
+	_, _, _ string,
+	failure Failure,
+	availableAt time.Time,
+) (State, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.failCalls++
+	queue.failure = failure
+	queue.availableAt = availableAt
+	return StateDeadLetter, nil
 }
 
-func (queue *workerQueueStub) CancelActive(context.Context, string, string) error {
+func (queue *workerQueueStub) CancelActive(context.Context, string, string, string) error {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	queue.cancelActiveCalls++
@@ -124,10 +136,9 @@ func TestWorkerAcknowledgesCancellationDetectedAtCompletion(t *testing.T) {
 		},
 	}
 
-	err := worker.process(context.Background(), Job{
-		ID:         "job_example",
-		Kind:       "parse-report",
-		LeaseToken: "lease_example",
+	err := worker.process(context.Background(), Lease{
+		Job:   Job{ID: "job_example", WorkspaceID: "wsp_example", Kind: "parse-report"},
+		token: "lease_example",
 	})
 	if err != nil {
 		t.Fatalf("process() error = %v", err)
@@ -153,10 +164,9 @@ func TestWorkerAcknowledgesCancellationDetectedByHeartbeat(t *testing.T) {
 		},
 	}
 
-	err := worker.process(context.Background(), Job{
-		ID:         "job_example",
-		Kind:       "parse-report",
-		LeaseToken: "lease_example",
+	err := worker.process(context.Background(), Lease{
+		Job:   Job{ID: "job_example", WorkspaceID: "wsp_example", Kind: "parse-report"},
+		token: "lease_example",
 	})
 	if err != nil {
 		t.Fatalf("process() error = %v", err)
@@ -171,5 +181,42 @@ func TestWaitForCancellation(t *testing.T) {
 	cancel()
 	if err := waitFor(ctx, time.Hour); err != context.Canceled {
 		t.Fatalf("waitFor() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWorkerStopsRetryAtMaximumAge(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	queue := &workerQueueStub{}
+	worker := &Worker{
+		queue: queue,
+		config: WorkerConfig{
+			LeaseDuration:     time.Minute,
+			HeartbeatInterval: time.Second,
+			RetryMinimum:      time.Second,
+			RetryMaximum:      time.Minute,
+			RetryMaximumAge:   time.Hour,
+		},
+		handlers: map[string]Handler{
+			"parse-report": func(context.Context, Job) Outcome {
+				return Outcome{Kind: OutcomeRetryable, Code: "storage_unavailable"}
+			},
+		},
+		now:    func() time.Time { return fixedNow },
+		jitter: func(int, time.Duration, time.Duration) time.Duration { return 30 * time.Second },
+	}
+	err := worker.process(context.Background(), Lease{
+		Job: Job{
+			ID: "job_example", WorkspaceID: "wsp_example", Kind: "parse-report",
+			CreatedAt: fixedNow.Add(-2 * time.Hour), AttemptCount: 2,
+		},
+		token: "lease_example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.failCalls != 1 || queue.failure.Class != ErrorPermanent || !queue.availableAt.IsZero() {
+		t.Fatalf("Fail() = calls %d, failure %+v, available %v", queue.failCalls, queue.failure, queue.availableAt)
 	}
 }
