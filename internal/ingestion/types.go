@@ -8,17 +8,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/spectremi/open-aspm/internal/blobstore"
 )
 
 const (
 	CapabilityImportsCreate = "imports:create"
+	CapabilityImportsUpload = "imports:upload"
 	apiMajorVersion         = 1
 	operationCreateImport   = "imports.create"
 	minimumRetention        = 24 * time.Hour
+	rawArtifactMediaType    = "application/octet-stream"
 )
 
 var (
@@ -26,11 +31,21 @@ var (
 	ErrForbidden             = errors.New("ingestion operation forbidden")
 	ErrIdempotencyConflict   = errors.New("idempotency key reused for a different request")
 	ErrIdempotencyInProgress = errors.New("idempotent request is already in progress")
+	ErrImportNotFound        = errors.New("import not found")
 	ErrInvalid               = errors.New("invalid ingestion input")
 	ErrTooLarge              = errors.New("report exceeds the import limit")
+	ErrUploadConflict        = errors.New("uploaded content conflicts with committed evidence")
+	ErrUploadExpired         = errors.New("upload reservation expired")
+	ErrUploadInProgress      = errors.New("another upload attempt is in progress")
+	ErrUploadLeaseLost       = errors.New("upload attempt lease was lost")
+	ErrUploadMismatch        = errors.New("uploaded content does not match declared expectations")
+	ErrUploadStorage         = errors.New("raw artifact storage backend is unavailable")
 )
 
-var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+var (
+	idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	storageBackendPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
+)
 
 // ImportState is the public import lifecycle, independent from internal job
 // lease state.
@@ -38,6 +53,19 @@ type ImportState string
 
 const (
 	ImportAwaitingUpload ImportState = "awaiting_upload"
+	ImportUploading      ImportState = "uploading"
+	ImportUploaded       ImportState = "uploaded"
+	ImportRejected       ImportState = "rejected"
+	ImportAbandoned      ImportState = "abandoned"
+)
+
+type rawArtifactState string
+
+const (
+	rawArtifactPending   rawArtifactState = "pending"
+	rawArtifactUploading rawArtifactState = "uploading"
+	rawArtifactCommitted rawArtifactState = "committed"
+	rawArtifactRejected  rawArtifactState = "rejected"
 )
 
 // ReportFormat identifies the declared report representation. It does not
@@ -85,8 +113,33 @@ type Reservation struct {
 	Created bool
 }
 
+// UploadRequest is the trusted application-service input for the reserved
+// content resource. ApplicationID is resolved from authorized routing context;
+// it is not accepted from the public upload body.
+type UploadRequest struct {
+	PrincipalID   string
+	WorkspaceID   string
+	ApplicationID string
+	ImportID      string
+	DeclaredSize  *int64
+	Content       io.Reader
+}
+
+// UploadReceipt contains public evidence metadata. Storage references remain
+// internal and are never returned to clients.
+type UploadReceipt struct {
+	ImportID   string
+	State      ImportState
+	SizeBytes  int64
+	SHA256     string
+	UploadedAt time.Time
+}
+
 type reserveSpec struct {
 	Import               Import
+	ArtifactID           string
+	StorageBackend       string
+	StorageKey           string
 	PrincipalID          string
 	APIMajorVersion      int
 	Operation            string
@@ -96,12 +149,80 @@ type reserveSpec struct {
 	IdempotencyExpiresAt time.Time
 }
 
+type beginUploadSpec struct {
+	PrincipalID    string
+	WorkspaceID    string
+	ApplicationID  string
+	ImportID       string
+	ArtifactID     string
+	StorageBackend string
+	StorageKey     string
+	AttemptID      string
+	StartedAt      time.Time
+	LeaseExpiresAt time.Time
+}
+
+type uploadSession struct {
+	WorkspaceID    string
+	ImportID       string
+	ArtifactID     string
+	StorageBackend string
+	StorageKey     string
+	AttemptID      string
+	MaxBytes       int64
+	ExpectedSize   *int64
+	ExpectedSHA256 string
+	Committed      bool
+	Receipt        UploadReceipt
+}
+
+type commitUploadSpec struct {
+	WorkspaceID    string
+	ImportID       string
+	ArtifactID     string
+	AttemptID      string
+	SizeBytes      int64
+	SHA256         string
+	StorageVersion string
+	BackendVersion string
+	CommittedAt    time.Time
+}
+
+type endUploadSpec struct {
+	WorkspaceID string
+	ImportID    string
+	ArtifactID  string
+	AttemptID   string
+	EndedAt     time.Time
+	RejectCode  string
+}
+
 func validateAuthorizationScope(request ReserveRequest) error {
 	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.WorkspaceID) ||
 		!validOpaqueID(request.ApplicationID) || !idempotencyKeyPattern.MatchString(request.IdempotencyKey) {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func validateUploadRequest(request UploadRequest) error {
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.WorkspaceID) ||
+		!validOpaqueID(request.ApplicationID) || !validOpaqueID(request.ImportID) ||
+		request.Content == nil {
+		return ErrInvalid
+	}
+	if request.DeclaredSize != nil && *request.DeclaredSize < 0 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func parseStorageKey(value string) (blobstore.Key, error) {
+	key, err := blobstore.ParseKey(value)
+	if err != nil {
+		return blobstore.Key{}, fmt.Errorf("restore raw artifact storage key: %w", err)
+	}
+	return key, nil
 }
 
 func fingerprintRequest(request ReserveRequest) ([sha256.Size]byte, error) {

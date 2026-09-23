@@ -7,13 +7,273 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/spectremi/open-aspm/internal/blobstore"
 )
 
 // PostgresStore persists ingestion-owned reservation state.
 type PostgresStore struct {
 	db *sql.DB
+}
+
+// BeginUpload fences one streaming attempt and returns immutable reservation
+// expectations. The transaction ends before BlobStore I/O begins.
+func (store *PostgresStore) BeginUpload(ctx context.Context, spec beginUploadSpec) (uploadSession, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return uploadSession{}, fmt.Errorf("begin raw artifact upload: %w", err)
+	}
+	defer tx.Rollback()
+
+	var importState ImportState
+	var maxBytes int64
+	var uploadExpiresAt time.Time
+	var expectedSize sql.NullInt64
+	var expectedDigest []byte
+	var artifactID, artifactState, storageBackend, storageKey, currentAttempt sql.NullString
+	var leaseExpiresAt sql.NullTime
+	var sizeBytes sql.NullInt64
+	var digest []byte
+	var storageVersion, backendVersion sql.NullString
+	var committedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT imp.state, imp.max_bytes, imp.upload_expires_at,
+		       imp.expected_size_bytes, imp.expected_sha256,
+		       art.id, art.state, art.storage_backend, art.storage_key, art.upload_attempt_id,
+		       art.upload_lease_expires_at, art.size_bytes, art.sha256,
+		       art.storage_version, art.backend_version, art.committed_at
+		FROM open_aspm.imports AS imp
+		LEFT JOIN open_aspm.raw_artifacts AS art
+		  ON art.workspace_id = imp.workspace_id AND art.import_id = imp.id
+		WHERE imp.workspace_id = $1 AND imp.id = $2
+		  AND imp.application_id = $3 AND imp.created_by_principal_id = $4
+		FOR UPDATE OF imp`,
+		spec.WorkspaceID, spec.ImportID, spec.ApplicationID, spec.PrincipalID,
+	).Scan(
+		&importState, &maxBytes, &uploadExpiresAt, &expectedSize, &expectedDigest,
+		&artifactID, &artifactState, &storageBackend, &storageKey, &currentAttempt, &leaseExpiresAt,
+		&sizeBytes, &digest, &storageVersion, &backendVersion, &committedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uploadSession{}, ErrImportNotFound
+	}
+	if err != nil {
+		return uploadSession{}, fmt.Errorf("read import upload reservation: %w", err)
+	}
+
+	session := uploadSession{
+		WorkspaceID: spec.WorkspaceID, ImportID: spec.ImportID, MaxBytes: maxBytes,
+		ExpectedSHA256: hex.EncodeToString(expectedDigest),
+	}
+	if expectedSize.Valid {
+		value := expectedSize.Int64
+		session.ExpectedSize = &value
+	}
+	if importState == ImportUploaded {
+		if !artifactID.Valid || rawArtifactState(artifactState.String) != rawArtifactCommitted ||
+			!sizeBytes.Valid || len(digest) != 32 || !committedAt.Valid {
+			return uploadSession{}, fmt.Errorf("read committed raw artifact: %w", blobstore.ErrIntegrity)
+		}
+		session.ArtifactID = artifactID.String
+		session.StorageBackend = storageBackend.String
+		session.StorageKey = storageKey.String
+		session.Committed = true
+		session.Receipt = UploadReceipt{
+			ImportID: spec.ImportID, State: ImportUploaded, SizeBytes: sizeBytes.Int64,
+			SHA256: hex.EncodeToString(digest), UploadedAt: committedAt.Time,
+		}
+		if err := tx.Commit(); err != nil {
+			return uploadSession{}, fmt.Errorf("finish upload replay lookup: %w", err)
+		}
+		return session, nil
+	}
+	if importState != ImportAwaitingUpload && importState != ImportUploading {
+		return uploadSession{}, ErrUploadConflict
+	}
+	if !spec.StartedAt.Before(uploadExpiresAt) {
+		if artifactID.Valid {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE open_aspm.raw_artifacts
+				SET state = 'abandoned', upload_attempt_id = NULL,
+				    upload_lease_expires_at = NULL, updated_at = $3
+				WHERE workspace_id = $1 AND import_id = $2 AND state <> 'committed'`,
+				spec.WorkspaceID, spec.ImportID, spec.StartedAt,
+			); err != nil {
+				return uploadSession{}, fmt.Errorf("abandon expired raw artifact: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE open_aspm.imports SET state = 'abandoned', updated_at = $3
+			WHERE workspace_id = $1 AND id = $2`, spec.WorkspaceID, spec.ImportID, spec.StartedAt,
+		); err != nil {
+			return uploadSession{}, fmt.Errorf("abandon expired import upload: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return uploadSession{}, fmt.Errorf("commit expired import upload: %w", err)
+		}
+		return uploadSession{}, ErrUploadExpired
+	}
+
+	if !artifactID.Valid {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO open_aspm.raw_artifacts (
+				workspace_id, id, import_id, state, media_type_hint, storage_backend, storage_key,
+				upload_attempt_id, upload_lease_expires_at, created_at, updated_at
+			) VALUES ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $9)`,
+			spec.WorkspaceID, spec.ArtifactID, spec.ImportID, rawArtifactMediaType,
+			spec.StorageBackend, spec.StorageKey, spec.AttemptID, spec.LeaseExpiresAt, spec.StartedAt,
+		)
+		if err != nil {
+			return uploadSession{}, classifyPostgresError("reserve raw artifact", err)
+		}
+		session.ArtifactID = spec.ArtifactID
+		session.StorageBackend = spec.StorageBackend
+		session.StorageKey = spec.StorageKey
+	} else {
+		session.ArtifactID = artifactID.String
+		session.StorageBackend = storageBackend.String
+		session.StorageKey = storageKey.String
+		switch rawArtifactState(artifactState.String) {
+		case rawArtifactUploading:
+			if leaseExpiresAt.Valid && leaseExpiresAt.Time.After(spec.StartedAt) {
+				return uploadSession{}, ErrUploadInProgress
+			}
+		case rawArtifactPending:
+		default:
+			return uploadSession{}, ErrUploadConflict
+		}
+		result, err := tx.ExecContext(ctx, `
+			UPDATE open_aspm.raw_artifacts
+			SET state = 'uploading', upload_attempt_id = $4,
+			    upload_lease_expires_at = $5, updated_at = $6
+			WHERE workspace_id = $1 AND id = $2 AND import_id = $3
+			  AND state IN ('pending', 'uploading')`,
+			spec.WorkspaceID, session.ArtifactID, spec.ImportID, spec.AttemptID,
+			spec.LeaseExpiresAt, spec.StartedAt,
+		)
+		if err != nil {
+			return uploadSession{}, fmt.Errorf("renew raw artifact upload lease: %w", err)
+		}
+		if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+			return uploadSession{}, ErrUploadLeaseLost
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE open_aspm.imports SET state = 'uploading', updated_at = $3
+		WHERE workspace_id = $1 AND id = $2`, spec.WorkspaceID, spec.ImportID, spec.StartedAt,
+	); err != nil {
+		return uploadSession{}, fmt.Errorf("mark import uploading: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return uploadSession{}, fmt.Errorf("commit raw artifact upload lease: %w", err)
+	}
+	session.AttemptID = spec.AttemptID
+	return session, nil
+}
+
+// CommitUpload atomically records verified blob metadata and publishes the
+// import as uploaded only for the current, unexpired attempt.
+func (store *PostgresStore) CommitUpload(ctx context.Context, spec commitUploadSpec) (UploadReceipt, error) {
+	digest, err := hex.DecodeString(spec.SHA256)
+	if err != nil || len(digest) != 32 || spec.SizeBytes < 0 || spec.StorageVersion == "" ||
+		spec.CommittedAt.IsZero() {
+		return UploadReceipt{}, ErrInvalid
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UploadReceipt{}, fmt.Errorf("begin raw artifact commit: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE open_aspm.raw_artifacts
+		SET state = 'committed', upload_attempt_id = NULL,
+		    upload_lease_expires_at = NULL, size_bytes = $5, sha256 = $6,
+		    storage_version = $7, backend_version = NULLIF($8::varchar, ''),
+		    updated_at = $9, committed_at = $9
+		WHERE workspace_id = $1 AND import_id = $2 AND id = $3
+		  AND state = 'uploading' AND upload_attempt_id = $4
+		  AND upload_lease_expires_at >= $9`,
+		spec.WorkspaceID, spec.ImportID, spec.ArtifactID, spec.AttemptID,
+		spec.SizeBytes, digest, spec.StorageVersion, spec.BackendVersion, spec.CommittedAt,
+	)
+	if err != nil {
+		return UploadReceipt{}, fmt.Errorf("commit raw artifact record: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return UploadReceipt{}, ErrUploadLeaseLost
+	}
+	result, err = tx.ExecContext(ctx, `
+		UPDATE open_aspm.imports SET state = 'uploaded', updated_at = $3
+		WHERE workspace_id = $1 AND id = $2 AND state = 'uploading'`,
+		spec.WorkspaceID, spec.ImportID, spec.CommittedAt,
+	)
+	if err != nil {
+		return UploadReceipt{}, fmt.Errorf("publish uploaded import: %w", err)
+	}
+	rows, err = result.RowsAffected()
+	if err != nil || rows != 1 {
+		return UploadReceipt{}, ErrUploadLeaseLost
+	}
+	if err := tx.Commit(); err != nil {
+		return UploadReceipt{}, fmt.Errorf("commit uploaded import: %w", err)
+	}
+	return UploadReceipt{
+		ImportID: spec.ImportID, State: ImportUploaded, SizeBytes: spec.SizeBytes,
+		SHA256: spec.SHA256, UploadedAt: spec.CommittedAt,
+	}, nil
+}
+
+// EndUpload either releases a retryable attempt back to pending or records a
+// stable rejection. Attempt fencing prevents a stale request from changing a
+// newer upload.
+func (store *PostgresStore) EndUpload(ctx context.Context, spec endUploadSpec) error {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin ending raw artifact upload: %w", err)
+	}
+	defer tx.Rollback()
+	artifactState := rawArtifactPending
+	importState := ImportAwaitingUpload
+	if spec.RejectCode != "" {
+		artifactState = rawArtifactRejected
+		importState = ImportRejected
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE open_aspm.raw_artifacts
+		SET state = $5, upload_attempt_id = NULL, upload_lease_expires_at = NULL,
+		    rejection_code = NULLIF($6::varchar, ''), updated_at = $7
+		WHERE workspace_id = $1 AND import_id = $2 AND id = $3
+		  AND state = 'uploading' AND upload_attempt_id = $4`,
+		spec.WorkspaceID, spec.ImportID, spec.ArtifactID, spec.AttemptID,
+		artifactState, spec.RejectCode, spec.EndedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("end raw artifact upload: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrUploadLeaseLost
+	}
+	result, err = tx.ExecContext(ctx, `
+		UPDATE open_aspm.imports SET state = $3, updated_at = $4
+		WHERE workspace_id = $1 AND id = $2 AND state = 'uploading'`,
+		spec.WorkspaceID, spec.ImportID, importState, spec.EndedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("end import upload: %w", err)
+	}
+	rows, err = result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrUploadLeaseLost
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit end of raw artifact upload: %w", err)
+	}
+	return nil
 }
 
 // NewPostgresStore returns an ingestion store backed by an existing pool.
@@ -105,6 +365,16 @@ func (store *PostgresStore) Reserve(ctx context.Context, spec reserveSpec) (Rese
 		spec.Import.UploadExpiresAt, spec.Import.CreatedAt, spec.Import.UpdatedAt,
 	); err != nil {
 		return Reservation{}, classifyPostgresError("insert import reservation", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO open_aspm.raw_artifacts (
+			workspace_id, id, import_id, state, media_type_hint,
+			storage_backend, storage_key, created_at, updated_at
+		) VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $7)`,
+		spec.Import.WorkspaceID, spec.ArtifactID, spec.Import.ID, rawArtifactMediaType,
+		spec.StorageBackend, spec.StorageKey, spec.Import.CreatedAt,
+	); err != nil {
+		return Reservation{}, classifyPostgresError("insert raw artifact reservation", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Reservation{}, classifyPostgresError("commit import reservation", err)

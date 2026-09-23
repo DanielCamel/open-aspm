@@ -7,9 +7,10 @@ Open ASPM keeps raw report bytes behind the backend-neutral interface in
 - `s3store` for private S3-compatible object storage.
 
 This implements the invariants accepted in
-[ADR-0005](../adr/0005-raw-artifact-storage-and-retention.md). It is storage
-infrastructure only; the HTTP ingestion path and PostgreSQL artifact records
-will be connected in a later change.
+[ADR-0005](../adr/0005-raw-artifact-storage-and-retention.md). The ingestion
+application service connects reserved imports to PostgreSQL artifact metadata
+and this boundary. HTTP routing and authentication remain a separate delivery
+slice.
 
 ## Immutable commit model
 
@@ -24,6 +25,12 @@ The manifest is the commit marker. Bytes without a manifest are invisible
 orphans and may be cleaned after a grace period. A manifest is published only
 after the byte stream and client expectations have been verified. Committed
 bytes are never replaced in place.
+
+The ingestion service stores a generated key before starting BlobStore I/O and
+uses a fenced upload lease. If BlobStore publication succeeds but the metadata
+transaction fails, a later full retry verifies its bytes against the committed
+manifest and finishes the PostgreSQL transition. A conflicting retry never
+replaces the committed object.
 
 `Open` computes SHA-256 again while the caller consumes the stream. Callers must
 read to EOF and close it; size or hash mismatch is returned as

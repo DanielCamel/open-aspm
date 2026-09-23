@@ -56,16 +56,20 @@ name):
 ```sql
 GRANT SELECT ON open_aspm.workspaces TO open_aspm_runtime;
 GRANT SELECT ON open_aspm.applications TO open_aspm_runtime;
-GRANT SELECT, INSERT ON open_aspm.imports TO open_aspm_runtime;
+GRANT SELECT, INSERT, UPDATE ON open_aspm.imports TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_create_idempotency TO open_aspm_runtime;
+GRANT SELECT, INSERT, UPDATE ON open_aspm.raw_artifacts TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.jobs TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.job_attempts TO open_aspm_runtime;
 ```
 
-The ingestion service currently implements only the `createImport` reservation
-boundary. It authorizes `imports:create` before persistence and records request
-idempotency by principal, workspace, API major version, operation, and key.
-Upload, completion, and HTTP authentication remain separate delivery slices.
+The ingestion service implements the `createImport` reservation and the
+streaming upload application boundaries. It authorizes `imports:create` or
+`imports:upload` before persistence, scopes uploads to the reservation owner,
+and stores verified immutable evidence through BlobStore. Upload attempts use
+database fencing and recover when blob publication succeeds before the metadata
+transaction. `completeImport`, HTTP routing, and authentication remain separate
+delivery slices.
 
 Queue payloads contain only bounded identifiers and metadata. Raw reports and
 credentials do not belong in queue rows. Lease-token plaintext is returned
