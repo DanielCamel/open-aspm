@@ -68,6 +68,8 @@ GRANT SELECT, INSERT ON open_aspm.scan_scopes TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_locations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO open_aspm_runtime;
 ```
 
 The ingestion service implements the `createImport` reservation, streaming
@@ -87,6 +89,21 @@ no `UPDATE` or `DELETE` grant on those tables. Replaying the same source run or
 parser-versioned source result returns the original record; conflicting reuse
 is rejected. This persistence is internal until the worker and authorized query
 contracts are wired.
+
+The `import.process` application handler reauthorizes the initiating principal
+and recorded system capability before resolving a BlobStore key. It compares
+BlobStore metadata with committed PostgreSQL metadata, consumes the verified
+stream through the bounded SARIF parser, records versioned parser warnings,
+and writes Scan and Observation records only through their owning module
+interfaces. Exact job replay returns the retained domain result. Malformed or
+unsupported evidence produces a stable sanitized terminal failure; transient
+database, authorization-backend, and BlobStore failures remain retryable until
+the job's attempt or age limit is reached.
+
+This handler is implemented and tested internally, but no `open-aspm worker`
+command or deployment configuration is available yet. Runtime registration,
+lease configuration, and storage-backend construction remain a separate
+delivery slice.
 
 Queue payloads contain only bounded identifiers and metadata. Raw reports and
 credentials do not belong in queue rows. Lease-token plaintext is returned

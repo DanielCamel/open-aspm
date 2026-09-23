@@ -47,7 +47,10 @@ Implemented and tested internally:
   lease state; and
 - a bounded, deterministic, versioned SARIF 2.1.0 parser; and
 - replay-safe immutable Scan and Observation persistence, including explicit
-  unknown scan result, completeness, and scope values.
+  unknown scan result, completeness, and scope values; and
+- an idempotent `import.process` application handler that reauthorizes queued
+  work, verifies BlobStore evidence, records parser diagnostics, and persists
+  SARIF Scan and Observation output with terminal Import/Operation state.
 
 Available to an operator today:
 
@@ -58,7 +61,7 @@ Available to an operator today:
 Not yet available as an end-to-end user workflow:
 
 - authenticated ingestion HTTP routes from the published OpenAPI contract;
-- worker processing of queued `import.process` jobs;
+- runtime registration and an operator command for the import worker;
 - normalization, correlation, and durable Finding state;
 - authorized ingestion and finding query APIs; and
 - the web interface.
@@ -71,8 +74,9 @@ not roadmap text alone, determine whether a capability is complete.
 
 Open ASPM currently provides operator commands and a minimal pre-alpha HTTP
 service. The HTTP service exposes health endpoints only; the implemented
-ingestion services and SARIF parser are not yet wired into public routes or a
-worker, and no authenticated production API is available.
+ingestion services and import processing handler are not yet wired into public
+routes or a runnable worker command, and no authenticated production API is
+available.
 
 ```bash
 go run ./cmd/open-aspm version

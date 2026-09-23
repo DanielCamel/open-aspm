@@ -18,17 +18,25 @@ import (
 )
 
 const (
-	CapabilityImportsCreate = "imports:create"
-	CapabilityImportsUpload = "imports:upload"
-	apiMajorVersion         = 1
-	operationCreateImport   = "imports.create"
-	operationCompleteImport = "imports.complete"
-	importProcessKind       = "import.process"
-	importProcessQueue      = "ingestion"
-	importProcessCapability = "imports:process"
-	importProcessSchema     = 1
-	minimumRetention        = 24 * time.Hour
-	rawArtifactMediaType    = "application/octet-stream"
+	CapabilityImportsCreate  = "imports:create"
+	CapabilityImportsUpload  = "imports:upload"
+	CapabilityImportsProcess = "imports:process"
+	apiMajorVersion          = 1
+	operationCreateImport    = "imports.create"
+	operationCompleteImport  = "imports.complete"
+	importProcessKind        = "import.process"
+	importProcessQueue       = "ingestion"
+	importProcessCapability  = CapabilityImportsProcess
+	importProcessSchema      = 1
+	minimumRetention         = 24 * time.Hour
+	rawArtifactMediaType     = "application/octet-stream"
+)
+
+const (
+	// ImportProcessJobKind and ImportProcessJobSchema identify the internal
+	// queue contract consumed by the import processing application service.
+	ImportProcessJobKind   = importProcessKind
+	ImportProcessJobSchema = importProcessSchema
 )
 
 var (
@@ -62,6 +70,9 @@ const (
 	ImportUploading      ImportState = "uploading"
 	ImportUploaded       ImportState = "uploaded"
 	ImportQueued         ImportState = "queued"
+	ImportProcessing     ImportState = "processing"
+	ImportSucceeded      ImportState = "succeeded"
+	ImportFailed         ImportState = "failed"
 	ImportRejected       ImportState = "rejected"
 	ImportAbandoned      ImportState = "abandoned"
 )
