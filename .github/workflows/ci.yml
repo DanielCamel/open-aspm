@@ -46,6 +46,7 @@ jobs:
         run: make test-race
 
   database:
+    # Keep this job name stable: main branch protection requires this check.
     name: PostgreSQL migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -73,7 +74,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Verify migrations with non-superuser roles
+      - name: Verify migrations and queue semantics
         env:
           OPEN_ASPM_TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: make test-integration
