@@ -472,19 +472,35 @@ func (q *Queue) Fail(
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE open_aspm.jobs
-		SET state = $4, available_at = CASE WHEN $4 = 'retry_wait' THEN $5 ELSE available_at END,
+		SET state = CAST($4 AS varchar(32)),
+			available_at = CASE
+				WHEN CAST($4 AS varchar(32)) = 'retry_wait' THEN CAST($5 AS timestamptz)
+				ELSE available_at
+			END,
 			lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-			last_error_class = CASE WHEN $4 = 'cancelled' THEN last_error_class ELSE $6 END,
-			last_error_code = CASE WHEN $4 = 'cancelled' THEN last_error_code ELSE $7 END,
-			completed_at = CASE WHEN $4 IN ('dead_letter', 'cancelled') THEN now() ELSE NULL END
+			last_error_class = CASE
+				WHEN CAST($4 AS varchar(32)) = 'cancelled' THEN last_error_class
+				ELSE CAST($6 AS varchar(64))
+			END,
+			last_error_code = CASE
+				WHEN CAST($4 AS varchar(32)) = 'cancelled' THEN last_error_code
+				ELSE CAST($7 AS varchar(128))
+			END,
+			completed_at = CASE
+				WHEN CAST($4 AS varchar(32)) IN ('dead_letter', 'cancelled') THEN now()
+				ELSE NULL
+			END
 		WHERE workspace_id = $1 AND id = $2 AND lease_token_hash = $3`,
 		workspaceID, id, tokenHash, state, availableAt, failure.Class, failure.Code); err != nil {
 		return "", fmt.Errorf("fail job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE open_aspm.job_attempts
-		SET finished_at = now(), outcome = $4,
-			safe_error_code = CASE WHEN $4 = 'cancelled' THEN NULL ELSE $5 END
+		SET finished_at = now(), outcome = CAST($4 AS varchar(64)),
+			safe_error_code = CASE
+				WHEN CAST($4 AS varchar(64)) = 'cancelled' THEN NULL
+				ELSE CAST($5 AS varchar(128))
+			END
 		WHERE workspace_id = $1 AND job_id = $2 AND attempt_number = $3`,
 		workspaceID, id, attemptCount, outcome, failure.Code); err != nil {
 		return "", fmt.Errorf("finish failed attempt: %w", err)
@@ -610,15 +626,18 @@ func (q *Queue) RecoverExpired(
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE open_aspm.jobs
-			SET state = $3, available_at = $4,
+			SET state = CAST($3 AS varchar(32)), available_at = CAST($4 AS timestamptz),
 				lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
 				last_error_class = CASE
-					WHEN $3 = 'cancelled' THEN last_error_class
-					WHEN $3 = 'dead_letter' THEN 'worker'
+					WHEN CAST($3 AS varchar(32)) = 'cancelled' THEN last_error_class
+					WHEN CAST($3 AS varchar(32)) = 'dead_letter' THEN 'worker'
 					ELSE 'retryable'
 				END,
-				last_error_code = CASE WHEN $3 = 'cancelled' THEN last_error_code ELSE 'lease_expired' END,
-				completed_at = CASE WHEN $5 THEN now() ELSE NULL END
+				last_error_code = CASE
+					WHEN CAST($3 AS varchar(32)) = 'cancelled' THEN last_error_code
+					ELSE 'lease_expired'
+				END,
+				completed_at = CASE WHEN CAST($5 AS boolean) THEN now() ELSE NULL END
 			WHERE workspace_id = $1 AND id = $2`,
 			job.workspace, job.id, state, availableAt, completed,
 		); err != nil {
@@ -626,8 +645,11 @@ func (q *Queue) RecoverExpired(
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE open_aspm.job_attempts
-			SET finished_at = now(), outcome = $4,
-				safe_error_code = CASE WHEN $4 = 'cancelled' THEN NULL ELSE 'lease_expired' END
+			SET finished_at = now(), outcome = CAST($4 AS varchar(64)),
+				safe_error_code = CASE
+					WHEN CAST($4 AS varchar(64)) = 'cancelled' THEN NULL
+					ELSE 'lease_expired'
+				END
 			WHERE workspace_id = $1 AND job_id = $2 AND attempt_number = $3`,
 			job.workspace, job.id, job.attempt, outcome,
 		); err != nil {
@@ -731,12 +753,12 @@ func (q *Queue) finishTx(
 	var attempt int
 	err := tx.QueryRowContext(ctx, `
 		UPDATE open_aspm.jobs
-		SET state = $4, lease_owner = NULL, lease_token_hash = NULL,
+		SET state = CAST($4 AS varchar(32)), lease_owner = NULL, lease_token_hash = NULL,
 			lease_expires_at = NULL, heartbeat_at = NULL, completed_at = now()
 		WHERE workspace_id = $1 AND id = $2 AND lease_token_hash = $3
-		  AND (state = 'running' OR ($4 = 'cancelled' AND state = 'leased'))
+		  AND (state = 'running' OR (CAST($4 AS varchar(32)) = 'cancelled' AND state = 'leased'))
 		  AND lease_expires_at > now()
-		  AND ($4 = 'cancelled' OR cancellation_requested_at IS NULL)
+		  AND (CAST($4 AS varchar(32)) = 'cancelled' OR cancellation_requested_at IS NULL)
 		RETURNING attempt_count`, workspaceID, id, tokenHash, state).Scan(&attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if state == StateSucceeded {
@@ -749,7 +771,7 @@ func (q *Queue) finishTx(
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE open_aspm.job_attempts
-		SET finished_at = now(), outcome = $4
+		SET finished_at = now(), outcome = CAST($4 AS varchar(64))
 		WHERE workspace_id = $1 AND job_id = $2 AND attempt_number = $3`,
 		workspaceID, id, attempt, state,
 	); err != nil {
