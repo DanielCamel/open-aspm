@@ -22,7 +22,7 @@ test:
 	$(GO) test -count=1 ./...
 
 test-integration:
-	$(GO) test -count=1 -tags=integration ./internal/database ./internal/jobqueue
+	$(GO) test -count=1 -tags=integration ./internal/database ./internal/ingestion ./internal/jobqueue
 
 test-s3-integration:
 	$(GO) test -count=1 -tags=integration ./internal/blobstore/s3store

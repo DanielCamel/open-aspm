@@ -48,15 +48,24 @@ OPEN_ASPM_TEST_DATABASE_ADMIN_URL='postgres://postgres:postgres@localhost/postgr
 
 Never point this test at a shared or production-like database.
 
-The queue migration adds the minimal workspace isolation root plus internal
-job and attempt tables. After migrations, grant the runtime role only the DML
-needed by the queue implementation (substitute the deployment's role name):
+The queue and import migrations add the minimal workspace, application,
+reservation, job, and attempt tables. After migrations, grant the runtime role
+only the DML needed by these implementations (substitute the deployment's role
+name):
 
 ```sql
 GRANT SELECT ON open_aspm.workspaces TO open_aspm_runtime;
+GRANT SELECT ON open_aspm.applications TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.imports TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.import_create_idempotency TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.jobs TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.job_attempts TO open_aspm_runtime;
 ```
+
+The ingestion service currently implements only the `createImport` reservation
+boundary. It authorizes `imports:create` before persistence and records request
+idempotency by principal, workspace, API major version, operation, and key.
+Upload, completion, and HTTP authentication remain separate delivery slices.
 
 Queue payloads contain only bounded identifiers and metadata. Raw reports and
 credentials do not belong in queue rows. Lease-token plaintext is returned
