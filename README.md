@@ -45,7 +45,9 @@ Implemented and tested internally:
   upload, and atomic `completeImport` queueing;
 - public asynchronous-operation persistence kept separate from internal queue
   lease state; and
-- a bounded, deterministic, versioned SARIF 2.1.0 parser.
+- a bounded, deterministic, versioned SARIF 2.1.0 parser; and
+- replay-safe immutable Scan and Observation persistence, including explicit
+  unknown scan result, completeness, and scope values.
 
 Available to an operator today:
 
@@ -57,7 +59,7 @@ Not yet available as an end-to-end user workflow:
 
 - authenticated ingestion HTTP routes from the published OpenAPI contract;
 - worker processing of queued `import.process` jobs;
-- durable Scan, Observation, normalization, correlation, and Finding state;
+- normalization, correlation, and durable Finding state;
 - authorized ingestion and finding query APIs; and
 - the web interface.
 

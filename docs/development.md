@@ -63,6 +63,11 @@ GRANT SELECT, INSERT, UPDATE ON open_aspm.operations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_complete_idempotency TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.jobs TO open_aspm_runtime;
 GRANT SELECT, INSERT, UPDATE ON open_aspm.job_attempts TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.scans TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.scan_scopes TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.observations TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.observation_locations TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO open_aspm_runtime;
 ```
 
 The ingestion service implements the `createImport` reservation, streaming
@@ -74,6 +79,14 @@ before the metadata transaction. Completing an uploaded import atomically
 creates its queued public operation, durable idempotency result, job, and import
 state transition. HTTP routing, authentication, operation queries, and worker
 processing remain separate delivery slices.
+
+The ingestion context owns immutable Scan and versioned ScanScope writes. The
+findings context owns immutable Observation writes, including structured source
+locations and scanner-provided fingerprints. Runtime roles intentionally have
+no `UPDATE` or `DELETE` grant on those tables. Replaying the same source run or
+parser-versioned source result returns the original record; conflicting reuse
+is rejected. This persistence is internal until the worker and authorized query
+contracts are wired.
 
 Queue payloads contain only bounded identifiers and metadata. Raw reports and
 credentials do not belong in queue rows. Lease-token plaintext is returned

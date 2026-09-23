@@ -745,6 +745,11 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE ON open_aspm.operations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_complete_idempotency TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.jobs TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.scans TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.scan_scopes TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observations TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_locations TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
 		if _, err := ownerDB.ExecContext(ctx, grant); err != nil {
