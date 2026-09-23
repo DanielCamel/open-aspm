@@ -70,8 +70,8 @@ func TestMigrationsRunAsNonSuperuser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if applied != 1 || status.Current != 1 || status.Target != 1 || status.Pending {
-		t.Fatalf("first Up() = (%+v, %d), want version 1 with one applied migration", status, applied)
+	if applied != 2 || status.Current != 2 || status.Target != 2 || status.Pending {
+		t.Fatalf("first Up() = (%+v, %d), want version 2 with two applied migrations", status, applied)
 	}
 	status, applied, err = migrator.Up(ctx)
 	if err != nil {
