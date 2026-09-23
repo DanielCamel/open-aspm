@@ -46,7 +46,8 @@ jobs:
         run: make test-race
 
   database:
-    name: PostgreSQL migrations and queue
+    # Keep this job name stable: main branch protection requires this check.
+    name: PostgreSQL migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
