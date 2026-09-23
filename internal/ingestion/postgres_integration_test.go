@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -24,6 +25,7 @@ import (
 	"github.com/spectremi/open-aspm/internal/blobstore"
 	"github.com/spectremi/open-aspm/internal/blobstore/filesystem"
 	"github.com/spectremi/open-aspm/internal/database"
+	"github.com/spectremi/open-aspm/internal/jobqueue"
 )
 
 func TestPostgresReservationIdempotencyAndIsolation(t *testing.T) {
@@ -296,6 +298,248 @@ func TestPostgresUploadLifecycleReplayAndIsolation(t *testing.T) {
 	}
 }
 
+func TestPostgresCompletionCreatesOneOperationAndJob(t *testing.T) {
+	service, db := openReservationService(t)
+	ctx := context.Background()
+	request := validRequest()
+	reservation := reserveAndUpload(t, service, request, []byte("synthetic completion evidence"))
+	complete := CompleteRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, ImportID: reservation.Import.ID,
+		IdempotencyKey: "complete-import",
+	}
+
+	created, err := service.Complete(ctx, complete)
+	if err != nil || !created.Created {
+		t.Fatalf("first Complete() = (%+v, %v), want created", created, err)
+	}
+	if created.Operation.WorkspaceID != request.WorkspaceID ||
+		created.Operation.ImportID != reservation.Import.ID ||
+		created.Operation.CreatedByPrincipalID != request.PrincipalID ||
+		created.Operation.Kind != importProcessKind || created.Operation.State != OperationQueued {
+		t.Fatalf("operation = %+v", created.Operation)
+	}
+
+	var importState ImportState
+	var operationState OperationState
+	var operationKind, operationID, principalID, capability, queue, jobKind string
+	var jobState jobqueue.State
+	var schemaVersion, maxAttempts int
+	var payload []byte
+	if err := db.QueryRowContext(ctx, `
+		SELECT imp.state, op.state, op.kind,
+		       job.operation_id, job.initiating_principal_id, job.system_capability,
+		       job.queue, job.kind, job.schema_version, job.payload,
+		       job.max_attempts, job.state
+		FROM open_aspm.imports AS imp
+		JOIN open_aspm.operations AS op
+		  ON op.workspace_id = imp.workspace_id AND op.import_id = imp.id
+		JOIN open_aspm.jobs AS job
+		  ON job.workspace_id = op.workspace_id AND job.operation_id = op.id
+		WHERE imp.workspace_id = $1 AND imp.id = $2`,
+		request.WorkspaceID, reservation.Import.ID,
+	).Scan(
+		&importState, &operationState, &operationKind,
+		&operationID, &principalID, &capability, &queue, &jobKind,
+		&schemaVersion, &payload, &maxAttempts, &jobState,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var jobPayload struct {
+		ImportID string `json:"import_id"`
+	}
+	if err := json.Unmarshal(payload, &jobPayload); err != nil {
+		t.Fatalf("decode job payload: %v", err)
+	}
+	if importState != ImportQueued || operationState != OperationQueued ||
+		operationKind != importProcessKind || operationID != created.Operation.ID ||
+		principalID != request.PrincipalID || capability != importProcessCapability ||
+		queue != importProcessQueue || jobKind != importProcessKind ||
+		schemaVersion != importProcessSchema || jobPayload.ImportID != reservation.Import.ID ||
+		maxAttempts != 3 || jobState != jobqueue.StateQueued {
+		t.Fatalf("stored completion = import %s operation %s/%s job %s/%s/%d payload %s attempts %d state %s",
+			importState, operationKind, operationState, queue, jobKind, schemaVersion,
+			payload, maxAttempts, jobState)
+	}
+
+	advancedAt := created.Operation.UpdatedAt.Add(time.Second)
+	if _, err := db.ExecContext(ctx, `
+		UPDATE open_aspm.operations
+		SET state = 'running', started_at = $3, updated_at = $3
+		WHERE workspace_id = $1 AND id = $2`,
+		request.WorkspaceID, created.Operation.ID, advancedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.Complete(ctx, complete)
+	if err != nil || replayed.Created || replayed.Operation.ID != created.Operation.ID ||
+		replayed.Operation.State != created.Operation.State ||
+		!replayed.Operation.CreatedAt.Equal(created.Operation.CreatedAt) ||
+		!replayed.Operation.UpdatedAt.Equal(created.Operation.UpdatedAt) {
+		t.Fatalf("completion replay = (%+v, %v), want original %+v", replayed, err, created.Operation)
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, reservation.Import.ID, 1, 1, 1)
+}
+
+func TestPostgresCompletionConflictsAndIsolation(t *testing.T) {
+	service, db := openReservationService(t)
+	ctx := context.Background()
+	request := validRequest()
+	first := reserveAndUpload(t, service, request, []byte("first completion evidence"))
+	complete := CompleteRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, ImportID: first.Import.ID,
+		IdempotencyKey: "complete-shared-key",
+	}
+	if _, err := service.Complete(ctx, complete); err != nil {
+		t.Fatal(err)
+	}
+
+	secondRequest := request
+	secondRequest.IdempotencyKey = "second-import"
+	second := reserveAndUpload(t, service, secondRequest, []byte("second completion evidence"))
+	conflictingKey := complete
+	conflictingKey.ImportID = second.Import.ID
+	if _, err := service.Complete(ctx, conflictingKey); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflicting idempotency key error = %v, want ErrIdempotencyConflict", err)
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, second.Import.ID, 0, 0, 0)
+
+	differentKey := complete
+	differentKey.IdempotencyKey = "different-completion-key"
+	if _, err := service.Complete(ctx, differentKey); !errors.Is(err, ErrCompletionConflict) {
+		t.Fatalf("repeat completion error = %v, want ErrCompletionConflict", err)
+	}
+
+	pendingRequest := request
+	pendingRequest.IdempotencyKey = "pending-import"
+	pending, err := service.Reserve(ctx, pendingRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	premature := complete
+	premature.ImportID = pending.Import.ID
+	premature.IdempotencyKey = "premature-completion"
+	if _, err := service.Complete(ctx, premature); !errors.Is(err, ErrCompletionConflict) {
+		t.Fatalf("premature completion error = %v, want ErrCompletionConflict", err)
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, pending.Import.ID, 0, 0, 0)
+
+	isolation := []struct {
+		name   string
+		mutate func(*CompleteRequest)
+	}{
+		{name: "workspace", mutate: func(value *CompleteRequest) {
+			value.WorkspaceID = "workspace-b"
+			value.ApplicationID = "application-b"
+		}},
+		{name: "application", mutate: func(value *CompleteRequest) {
+			value.ApplicationID = "application-other"
+		}},
+		{name: "owner", mutate: func(value *CompleteRequest) {
+			value.PrincipalID = "principal-b"
+		}},
+	}
+	for _, test := range isolation {
+		t.Run(test.name, func(t *testing.T) {
+			value := complete
+			value.IdempotencyKey = "isolated-" + test.name
+			test.mutate(&value)
+			if _, err := service.Complete(ctx, value); !errors.Is(err, ErrImportNotFound) {
+				t.Fatalf("Complete() error = %v, want ErrImportNotFound", err)
+			}
+		})
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, first.Import.ID, 1, 1, 1)
+}
+
+func TestConcurrentCompletionCreatesOneOperationAndJob(t *testing.T) {
+	service, db := openReservationService(t)
+	ctx := context.Background()
+	request := validRequest()
+	reservation := reserveAndUpload(t, service, request, []byte("concurrent completion evidence"))
+	complete := CompleteRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, ImportID: reservation.Import.ID,
+		IdempotencyKey: "concurrent-completion",
+	}
+
+	const requestCount = 16
+	type result struct {
+		completion Completion
+		err        error
+	}
+	results := make(chan result, requestCount)
+	var wait sync.WaitGroup
+	for index := 0; index < requestCount; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			completion, err := service.Complete(ctx, complete)
+			results <- result{completion: completion, err: err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+
+	createdCount := 0
+	var operationID string
+	for result := range results {
+		if errors.Is(result.err, ErrIdempotencyInProgress) {
+			continue
+		}
+		if result.err != nil {
+			t.Fatalf("concurrent Complete() error = %v", result.err)
+		}
+		if operationID == "" {
+			operationID = result.completion.Operation.ID
+		} else if result.completion.Operation.ID != operationID {
+			t.Fatalf("operation ID = %q, want %q", result.completion.Operation.ID, operationID)
+		}
+		if result.completion.Created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created completions = %d, want one", createdCount)
+	}
+	finalReplay, err := service.Complete(ctx, complete)
+	if err != nil || finalReplay.Created || finalReplay.Operation.ID != operationID {
+		t.Fatalf("final completion replay = (%+v, %v), want operation %q", finalReplay, err, operationID)
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, reservation.Import.ID, 1, 1, 1)
+}
+
+func TestCompletionRollsBackWhenQueueEnqueueFails(t *testing.T) {
+	service, db := openReservationService(t)
+	ctx := context.Background()
+	request := validRequest()
+	reservation := reserveAndUpload(t, service, request, []byte("rollback completion evidence"))
+	store := service.store.(*PostgresStore)
+	store.jobs = failingTransactionalEnqueuer{err: errors.New("synthetic enqueue failure")}
+	complete := CompleteRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, ImportID: reservation.Import.ID,
+		IdempotencyKey: "failed-enqueue",
+	}
+
+	if _, err := service.Complete(ctx, complete); err == nil ||
+		!strings.Contains(err.Error(), "enqueue import processing") {
+		t.Fatalf("Complete() error = %v, want enqueue context", err)
+	}
+	var state ImportState
+	if err := db.QueryRowContext(ctx, `
+		SELECT state FROM open_aspm.imports WHERE workspace_id = $1 AND id = $2`,
+		request.WorkspaceID, reservation.Import.ID,
+	).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != ImportUploaded {
+		t.Fatalf("import state = %s, want uploaded", state)
+	}
+	assertCompletionCounts(t, db, request.WorkspaceID, reservation.Import.ID, 0, 0, 0)
+}
+
 func TestPostgresUploadRecoversBlobAfterMetadataCommitFailure(t *testing.T) {
 	service, _ := openReservationService(t)
 	ctx := context.Background()
@@ -388,6 +632,16 @@ func TestPostgresUploadLeaseFencesConcurrentAndStaleAttempts(t *testing.T) {
 type failCommitOnceStore struct {
 	*PostgresStore
 	failed bool
+}
+
+type failingTransactionalEnqueuer struct{ err error }
+
+func (enqueuer failingTransactionalEnqueuer) EnqueueTx(
+	context.Context,
+	*sql.Tx,
+	jobqueue.Spec,
+) (jobqueue.Job, bool, error) {
+	return jobqueue.Job{}, false, enqueuer.err
 }
 
 func (store *failCommitOnceStore) CommitUpload(ctx context.Context, spec commitUploadSpec) (UploadReceipt, error) {
@@ -488,6 +742,9 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE ON open_aspm.imports TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_create_idempotency TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE ON open_aspm.raw_artifacts TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE ON open_aspm.operations TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_complete_idempotency TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.jobs TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
 		if _, err := ownerDB.ExecContext(ctx, grant); err != nil {
@@ -514,12 +771,67 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 	service, err := NewService(store, blobs, allowAuthorizer{}, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
-		StorageBackend: "filesystem-test",
+		StorageBackend: "filesystem-test", ProcessMaxAttempts: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service, db
+}
+
+func reserveAndUpload(t *testing.T, service *Service, request ReserveRequest, content []byte) Reservation {
+	t.Helper()
+	reservation, err := service.Reserve(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	if _, err := service.Upload(context.Background(), UploadRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, ImportID: reservation.Import.ID,
+		Content: bytes.NewReader(content),
+	}); err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	return reservation
+}
+
+func assertCompletionCounts(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID, importID string,
+	wantOperations, wantJobs, wantIdempotency int,
+) {
+	t.Helper()
+	ctx := context.Background()
+	var operations, jobs, idempotency int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM open_aspm.operations
+		WHERE workspace_id = $1 AND import_id = $2`, workspaceID, importID,
+	).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM open_aspm.jobs AS job
+		JOIN open_aspm.operations AS op
+		  ON op.workspace_id = job.workspace_id AND op.id = job.operation_id
+		WHERE op.workspace_id = $1 AND op.import_id = $2`, workspaceID, importID,
+	).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM open_aspm.import_complete_idempotency AS idem
+		JOIN open_aspm.operations AS op
+		  ON op.workspace_id = idem.workspace_id AND op.id = idem.operation_id
+		WHERE op.workspace_id = $1 AND op.import_id = $2`, workspaceID, importID,
+	).Scan(&idempotency); err != nil {
+		t.Fatal(err)
+	}
+	if operations != wantOperations || jobs != wantJobs || idempotency != wantIdempotency {
+		t.Fatalf("completion counts = operations %d, jobs %d, idempotency %d; want %d, %d, %d",
+			operations, jobs, idempotency, wantOperations, wantJobs, wantIdempotency)
+	}
 }
 
 func ingestionTestDatabaseURL(t *testing.T, baseURL, databaseName, user, password string) string {

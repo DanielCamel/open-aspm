@@ -22,6 +22,11 @@ const (
 	CapabilityImportsUpload = "imports:upload"
 	apiMajorVersion         = 1
 	operationCreateImport   = "imports.create"
+	operationCompleteImport = "imports.complete"
+	importProcessKind       = "import.process"
+	importProcessQueue      = "ingestion"
+	importProcessCapability = "imports:process"
+	importProcessSchema     = 1
 	minimumRetention        = 24 * time.Hour
 	rawArtifactMediaType    = "application/octet-stream"
 )
@@ -34,6 +39,7 @@ var (
 	ErrImportNotFound        = errors.New("import not found")
 	ErrInvalid               = errors.New("invalid ingestion input")
 	ErrTooLarge              = errors.New("report exceeds the import limit")
+	ErrCompletionConflict    = errors.New("import is not ready for completion")
 	ErrUploadConflict        = errors.New("uploaded content conflicts with committed evidence")
 	ErrUploadExpired         = errors.New("upload reservation expired")
 	ErrUploadInProgress      = errors.New("another upload attempt is in progress")
@@ -55,6 +61,7 @@ const (
 	ImportAwaitingUpload ImportState = "awaiting_upload"
 	ImportUploading      ImportState = "uploading"
 	ImportUploaded       ImportState = "uploaded"
+	ImportQueued         ImportState = "queued"
 	ImportRejected       ImportState = "rejected"
 	ImportAbandoned      ImportState = "abandoned"
 )
@@ -135,6 +142,48 @@ type UploadReceipt struct {
 	UploadedAt time.Time
 }
 
+// OperationState is the public asynchronous lifecycle and deliberately does
+// not expose internal queue lease or retry states.
+type OperationState string
+
+const (
+	OperationQueued    OperationState = "queued"
+	OperationRunning   OperationState = "running"
+	OperationSucceeded OperationState = "succeeded"
+	OperationFailed    OperationState = "failed"
+	OperationCancelled OperationState = "cancelled"
+)
+
+// Operation is the public processing resource created by completeImport.
+type Operation struct {
+	ID                   string
+	WorkspaceID          string
+	ImportID             string
+	CreatedByPrincipalID string
+	Kind                 string
+	State                OperationState
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+// CompleteRequest identifies the already uploaded import and the required
+// completeImport idempotency key. ApplicationID is trusted routing context,
+// not a public request-body field.
+type CompleteRequest struct {
+	PrincipalID    string
+	WorkspaceID    string
+	ApplicationID  string
+	ImportID       string
+	IdempotencyKey string
+}
+
+// Completion reports whether this call created the queued operation. Replays
+// return the original Operation with Created false and still map to HTTP 202.
+type Completion struct {
+	Operation Operation
+	Created   bool
+}
+
 type reserveSpec struct {
 	Import               Import
 	ArtifactID           string
@@ -197,6 +246,18 @@ type endUploadSpec struct {
 	RejectCode  string
 }
 
+type completeSpec struct {
+	Operation            Operation
+	ApplicationID        string
+	PrincipalID          string
+	APIMajorVersion      int
+	IdempotencyOperation string
+	IdempotencyKey       string
+	RequestFingerprint   [sha256.Size]byte
+	IdempotencyExpiresAt time.Time
+	ProcessMaxAttempts   int
+}
+
 func validateAuthorizationScope(request ReserveRequest) error {
 	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.WorkspaceID) ||
 		!validOpaqueID(request.ApplicationID) || !idempotencyKeyPattern.MatchString(request.IdempotencyKey) {
@@ -215,6 +276,28 @@ func validateUploadRequest(request UploadRequest) error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func validateCompleteRequest(request CompleteRequest) error {
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.WorkspaceID) ||
+		!validOpaqueID(request.ApplicationID) || !validOpaqueID(request.ImportID) ||
+		!idempotencyKeyPattern.MatchString(request.IdempotencyKey) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func fingerprintCompletion(request CompleteRequest) ([sha256.Size]byte, error) {
+	if err := validateCompleteRequest(request); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	encoded, err := json.Marshal(struct {
+		ImportID string `json:"import_id"`
+	}{ImportID: request.ImportID})
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("fingerprint import completion: %w", err)
+	}
+	return sha256.Sum256(encoded), nil
 }
 
 func parseStorageKey(value string) (blobstore.Key, error) {
@@ -285,6 +368,23 @@ func idempotencyLockKey(spec reserveSpec) string {
 	}{
 		WorkspaceID: spec.Import.WorkspaceID, PrincipalID: spec.PrincipalID,
 		APIMajorVersion: spec.APIMajorVersion, Operation: spec.Operation,
+		IdempotencyKey: spec.IdempotencyKey,
+	}
+	encoded, _ := json.Marshal(input)
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+func completionLockKey(spec completeSpec) string {
+	input := struct {
+		WorkspaceID     string `json:"workspace_id"`
+		PrincipalID     string `json:"principal_id"`
+		APIMajorVersion int    `json:"api_major_version"`
+		Operation       string `json:"operation"`
+		IdempotencyKey  string `json:"idempotency_key"`
+	}{
+		WorkspaceID: spec.Operation.WorkspaceID, PrincipalID: spec.PrincipalID,
+		APIMajorVersion: spec.APIMajorVersion, Operation: spec.IdempotencyOperation,
 		IdempotencyKey: spec.IdempotencyKey,
 	}
 	encoded, _ := json.Marshal(input)

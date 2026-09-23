@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,11 +13,178 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/spectremi/open-aspm/internal/blobstore"
+	"github.com/spectremi/open-aspm/internal/jobqueue"
 )
 
 // PostgresStore persists ingestion-owned reservation state.
 type PostgresStore struct {
-	db *sql.DB
+	db   *sql.DB
+	jobs transactionalEnqueuer
+}
+
+type transactionalEnqueuer interface {
+	EnqueueTx(context.Context, *sql.Tx, jobqueue.Spec) (jobqueue.Job, bool, error)
+}
+
+// Complete creates the public operation, processing job, idempotency result,
+// and import state transition in one transaction.
+func (store *PostgresStore) Complete(ctx context.Context, spec completeSpec) (Completion, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Completion{}, fmt.Errorf("begin import completion: %w", err)
+	}
+	defer tx.Rollback()
+	var lockAcquired bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))`,
+		"open-aspm-import-idempotency:"+completionLockKey(spec),
+	).Scan(&lockAcquired); err != nil {
+		return Completion{}, fmt.Errorf("lock import completion idempotency scope: %w", err)
+	}
+	if !lockAcquired {
+		return Completion{}, ErrIdempotencyInProgress
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO open_aspm.import_complete_idempotency (
+			workspace_id, principal_id, api_major_version, operation,
+			idempotency_key, request_fingerprint, operation_id, completed_at, expires_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (
+			workspace_id, principal_id, api_major_version, operation, idempotency_key
+		) DO NOTHING`,
+		spec.Operation.WorkspaceID, spec.PrincipalID, spec.APIMajorVersion,
+		spec.IdempotencyOperation, spec.IdempotencyKey, spec.RequestFingerprint[:],
+		spec.Operation.ID, spec.Operation.CreatedAt, spec.IdempotencyExpiresAt,
+	)
+	if err != nil {
+		return Completion{}, fmt.Errorf("claim import completion idempotency key: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Completion{}, fmt.Errorf("read import completion claim result: %w", err)
+	}
+	if rows == 0 {
+		completion, fingerprint, err := selectCompletion(ctx, tx, spec)
+		if err != nil {
+			return Completion{}, err
+		}
+		if !bytes.Equal(fingerprint, spec.RequestFingerprint[:]) {
+			return Completion{}, ErrIdempotencyConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return Completion{}, fmt.Errorf("finish import completion replay: %w", err)
+		}
+		completion.Created = false
+		return completion, nil
+	}
+
+	var importState ImportState
+	var artifactState sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT imp.state, art.state
+		FROM open_aspm.imports AS imp
+		LEFT JOIN open_aspm.raw_artifacts AS art
+		  ON art.workspace_id = imp.workspace_id AND art.import_id = imp.id
+		WHERE imp.workspace_id = $1 AND imp.id = $2
+		  AND imp.application_id = $3 AND imp.created_by_principal_id = $4
+		FOR UPDATE OF imp`,
+		spec.Operation.WorkspaceID, spec.Operation.ImportID,
+		spec.ApplicationID, spec.PrincipalID,
+	).Scan(&importState, &artifactState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Completion{}, ErrImportNotFound
+	}
+	if err != nil {
+		return Completion{}, fmt.Errorf("read import for completion: %w", err)
+	}
+	if importState != ImportUploaded || !artifactState.Valid ||
+		rawArtifactState(artifactState.String) != rawArtifactCommitted {
+		return Completion{}, ErrCompletionConflict
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO open_aspm.operations (
+			workspace_id, id, import_id, created_by_principal_id,
+			kind, state, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		spec.Operation.WorkspaceID, spec.Operation.ID, spec.Operation.ImportID,
+		spec.Operation.CreatedByPrincipalID, spec.Operation.Kind, spec.Operation.State,
+		spec.Operation.CreatedAt, spec.Operation.UpdatedAt,
+	); err != nil {
+		return Completion{}, fmt.Errorf("insert import operation: %w", err)
+	}
+	payload, err := json.Marshal(struct {
+		ImportID string `json:"import_id"`
+	}{ImportID: spec.Operation.ImportID})
+	if err != nil {
+		return Completion{}, fmt.Errorf("encode import processing job: %w", err)
+	}
+	if _, _, err := store.jobs.EnqueueTx(ctx, tx, jobqueue.Spec{
+		WorkspaceID: spec.Operation.WorkspaceID, OperationID: spec.Operation.ID,
+		InitiatingPrincipalID: spec.PrincipalID, SystemCapability: importProcessCapability,
+		Queue: importProcessQueue, Kind: importProcessKind, SchemaVersion: importProcessSchema,
+		Payload: payload, IdempotencyKey: spec.Operation.ID, MaxAttempts: spec.ProcessMaxAttempts,
+	}); err != nil {
+		return Completion{}, fmt.Errorf("enqueue import processing: %w", err)
+	}
+	result, err = tx.ExecContext(ctx, `
+		UPDATE open_aspm.imports SET state = 'queued', updated_at = $3
+		WHERE workspace_id = $1 AND id = $2 AND state = 'uploaded'`,
+		spec.Operation.WorkspaceID, spec.Operation.ImportID, spec.Operation.UpdatedAt,
+	)
+	if err != nil {
+		return Completion{}, fmt.Errorf("queue import processing: %w", err)
+	}
+	rows, err = result.RowsAffected()
+	if err != nil {
+		return Completion{}, fmt.Errorf("read import queue transition result: %w", err)
+	}
+	if rows != 1 {
+		return Completion{}, ErrCompletionConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return Completion{}, fmt.Errorf("commit import completion: %w", err)
+	}
+	return Completion{Operation: spec.Operation, Created: true}, nil
+}
+
+func selectCompletion(
+	ctx context.Context,
+	tx *sql.Tx,
+	spec completeSpec,
+) (Completion, []byte, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT idem.request_fingerprint,
+		       op.id, op.workspace_id, op.import_id, op.created_by_principal_id,
+		       op.kind, op.created_at, idem.completed_at
+		FROM open_aspm.import_complete_idempotency AS idem
+		JOIN open_aspm.operations AS op
+		  ON op.workspace_id = idem.workspace_id AND op.id = idem.operation_id
+		JOIN open_aspm.imports AS imp
+		  ON imp.workspace_id = op.workspace_id AND imp.id = op.import_id
+		WHERE idem.workspace_id = $1 AND idem.principal_id = $2
+		  AND idem.api_major_version = $3 AND idem.operation = $4
+		  AND idem.idempotency_key = $5
+		  AND imp.application_id = $6 AND imp.created_by_principal_id = $2`,
+		spec.Operation.WorkspaceID, spec.PrincipalID, spec.APIMajorVersion,
+		spec.IdempotencyOperation, spec.IdempotencyKey, spec.ApplicationID,
+	)
+	var fingerprint []byte
+	var operation Operation
+	if err := row.Scan(
+		&fingerprint, &operation.ID, &operation.WorkspaceID, &operation.ImportID,
+		&operation.CreatedByPrincipalID, &operation.Kind,
+		&operation.CreatedAt, &operation.UpdatedAt,
+	); errors.Is(err, sql.ErrNoRows) {
+		return Completion{}, nil, ErrImportNotFound
+	} else if err != nil {
+		return Completion{}, nil, fmt.Errorf("read import completion replay: %w", err)
+	}
+	// completeImport idempotency replays the original 202 response snapshot,
+	// even when the separately queryable operation has since advanced.
+	operation.State = OperationQueued
+	return Completion{Operation: operation}, fingerprint, nil
 }
 
 // BeginUpload fences one streaming attempt and returns immutable reservation
@@ -281,7 +449,11 @@ func NewPostgresStore(db *sql.DB) (*PostgresStore, error) {
 	if db == nil {
 		return nil, ErrInvalid
 	}
-	return &PostgresStore{db: db}, nil
+	jobs, err := jobqueue.New(db)
+	if err != nil {
+		return nil, fmt.Errorf("create ingestion job queue: %w", err)
+	}
+	return &PostgresStore{db: db, jobs: jobs}, nil
 }
 
 // Reserve creates one import and its completed idempotency entry atomically.

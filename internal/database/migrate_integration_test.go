@@ -70,8 +70,8 @@ func TestMigrationsRunAsNonSuperuser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if applied != 4 || status.Current != 4 || status.Target != 4 || status.Pending {
-		t.Fatalf("first Up() = (%+v, %d), want version 4 with four applied migrations", status, applied)
+	if applied != 5 || status.Current != 5 || status.Target != 5 || status.Pending {
+		t.Fatalf("first Up() = (%+v, %d), want version 5 with five applied migrations", status, applied)
 	}
 	status, applied, err = migrator.Up(ctx)
 	if err != nil {
@@ -164,7 +164,8 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 		"migrations/00002_second.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
 		"migrations/00003_third.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
 		"migrations/00004_fourth.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00005_broken.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
+		"migrations/00005_fifth.sql":   &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00006_broken.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
 	}
 	migrator, err := newMigrator(db, fs.FS(brokenFS))
 	if err != nil {
@@ -177,7 +178,7 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 	if err != nil {
 		t.Fatalf("read status after failed migration: %v", err)
 	}
-	if status.Current != 4 || !status.Pending {
-		t.Fatalf("status after failed migration = %+v, want current 4 and pending", status)
+	if status.Current != 5 || !status.Pending {
+		t.Fatalf("status after failed migration = %+v, want current 5 and pending", status)
 	}
 }

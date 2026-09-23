@@ -155,17 +155,18 @@ func TestNewServiceRejectsUnsafeConfiguration(t *testing.T) {
 	valid := Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
-		StorageBackend: "test",
+		StorageBackend: "test", ProcessMaxAttempts: 3,
 	}
 	tests := []struct {
 		name   string
 		config Config
 	}{
 		{name: "zero max bytes", config: Config{UploadReservationTTL: valid.UploadReservationTTL, IdempotencyRetention: valid.IdempotencyRetention}},
-		{name: "zero upload ttl", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: valid.StorageBackend}},
-		{name: "zero upload timeout", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: valid.StorageBackend}},
-		{name: "short idempotency retention", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: 23 * time.Hour, StorageBackend: valid.StorageBackend}},
-		{name: "bad storage backend", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: "Bad backend"}},
+		{name: "zero upload ttl", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: valid.StorageBackend, ProcessMaxAttempts: valid.ProcessMaxAttempts}},
+		{name: "zero upload timeout", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: valid.StorageBackend, ProcessMaxAttempts: valid.ProcessMaxAttempts}},
+		{name: "short idempotency retention", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: 23 * time.Hour, StorageBackend: valid.StorageBackend, ProcessMaxAttempts: valid.ProcessMaxAttempts}},
+		{name: "bad storage backend", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: "Bad backend", ProcessMaxAttempts: valid.ProcessMaxAttempts}},
+		{name: "zero process attempts", config: Config{MaxUploadBytes: valid.MaxUploadBytes, UploadReservationTTL: valid.UploadReservationTTL, UploadTimeout: valid.UploadTimeout, IdempotencyRetention: valid.IdempotencyRetention, StorageBackend: valid.StorageBackend}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -187,18 +188,22 @@ func (authorizer *recordingAuthorizer) Authorize(_ context.Context, request Auth
 }
 
 type recordingStore struct {
-	calls        int
-	spec         reserveSpec
-	beginCalls   int
-	beginSpec    beginUploadSpec
-	beginResult  uploadSession
-	beginErr     error
-	commitCalls  int
-	commitSpec   commitUploadSpec
-	commitResult UploadReceipt
-	commitErr    error
-	endSpecs     []endUploadSpec
-	endErr       error
+	calls          int
+	spec           reserveSpec
+	beginCalls     int
+	beginSpec      beginUploadSpec
+	beginResult    uploadSession
+	beginErr       error
+	commitCalls    int
+	commitSpec     commitUploadSpec
+	commitResult   UploadReceipt
+	commitErr      error
+	endSpecs       []endUploadSpec
+	endErr         error
+	completeCalls  int
+	completeSpec   completeSpec
+	completeResult Completion
+	completeErr    error
 }
 
 func TestUploadAuthorizesStreamsAndCommitsVerifiedMetadata(t *testing.T) {
@@ -419,6 +424,117 @@ func (store *recordingStore) EndUpload(_ context.Context, spec endUploadSpec) er
 	return store.endErr
 }
 
+func TestCompleteAuthorizesAndBuildsQueuedOperation(t *testing.T) {
+	store := &recordingStore{}
+	authorizer := &recordingAuthorizer{}
+	service := newTestService(t, store, authorizer)
+	fixedTime := time.Date(2026, time.September, 23, 13, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return fixedTime }
+	service.random = func(buffer []byte) error {
+		for index := range buffer {
+			buffer[index] = byte(index + 1)
+		}
+		return nil
+	}
+	request := validCompleteRequest()
+
+	result, err := service.Complete(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if !result.Created || result.Operation.ID != "op_aebagbafaydqqcikbmga2dqpcaireeyu" ||
+		result.Operation.WorkspaceID != request.WorkspaceID || result.Operation.ImportID != request.ImportID ||
+		result.Operation.Kind != importProcessKind || result.Operation.State != OperationQueued ||
+		!result.Operation.CreatedAt.Equal(fixedTime) || !result.Operation.UpdatedAt.Equal(fixedTime) {
+		t.Fatalf("completion = %+v", result)
+	}
+	if len(authorizer.requests) != 1 || authorizer.requests[0] != (AuthorizationRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, Capability: CapabilityImportsUpload,
+	}) {
+		t.Fatalf("authorization requests = %+v", authorizer.requests)
+	}
+	if store.completeCalls != 1 || store.completeSpec.ApplicationID != request.ApplicationID ||
+		store.completeSpec.APIMajorVersion != 1 ||
+		store.completeSpec.IdempotencyOperation != operationCompleteImport ||
+		store.completeSpec.IdempotencyKey != request.IdempotencyKey ||
+		store.completeSpec.ProcessMaxAttempts != 3 ||
+		!store.completeSpec.IdempotencyExpiresAt.Equal(fixedTime.Add(24*time.Hour)) {
+		t.Fatalf("complete spec = %+v", store.completeSpec)
+	}
+	expectedFingerprint, err := fingerprintCompletion(request)
+	if err != nil || store.completeSpec.RequestFingerprint != expectedFingerprint {
+		t.Fatalf("completion fingerprint = %x, error = %v", store.completeSpec.RequestFingerprint, err)
+	}
+}
+
+func TestCompleteDenialPerformsNoStoreWrite(t *testing.T) {
+	store := &recordingStore{}
+	service := newTestService(t, store, &recordingAuthorizer{err: ErrForbidden})
+
+	_, err := service.Complete(context.Background(), validCompleteRequest())
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("Complete() error = %v, want ErrForbidden", err)
+	}
+	if store.completeCalls != 0 {
+		t.Fatalf("complete calls = %d, want zero", store.completeCalls)
+	}
+}
+
+func TestCompleteValidatesContractFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CompleteRequest)
+	}{
+		{name: "principal", mutate: func(request *CompleteRequest) { request.PrincipalID = " x" }},
+		{name: "workspace", mutate: func(request *CompleteRequest) { request.WorkspaceID = "" }},
+		{name: "application", mutate: func(request *CompleteRequest) { request.ApplicationID = "a" }},
+		{name: "import", mutate: func(request *CompleteRequest) { request.ImportID = "bad\x00id" }},
+		{name: "idempotency key", mutate: func(request *CompleteRequest) { request.IdempotencyKey = "bad key" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &recordingStore{}
+			service := newTestService(t, store, &recordingAuthorizer{})
+			request := validCompleteRequest()
+			test.mutate(&request)
+			if _, err := service.Complete(context.Background(), request); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Complete() error = %v, want ErrInvalid", err)
+			}
+			if store.completeCalls != 0 {
+				t.Fatalf("complete calls = %d, want zero", store.completeCalls)
+			}
+		})
+	}
+}
+
+func TestCompletionFingerprintUsesOnlyValidatedAPIInput(t *testing.T) {
+	request := validCompleteRequest()
+	first, err := fingerprintCompletion(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fingerprintCompletion(request)
+	if err != nil || first != second {
+		t.Fatalf("identical completion fingerprint changed: %x %x, %v", first, second, err)
+	}
+	changed := request
+	changed.ImportID = "import-b"
+	third, err := fingerprintCompletion(changed)
+	if err != nil || first == third {
+		t.Fatalf("different import fingerprint = %x, want different from %x; %v", third, first, err)
+	}
+}
+
+func (store *recordingStore) Complete(_ context.Context, spec completeSpec) (Completion, error) {
+	store.completeCalls++
+	store.completeSpec = spec
+	if store.completeErr == nil && store.completeResult.Operation.ID == "" {
+		return Completion{Operation: spec.Operation, Created: true}, nil
+	}
+	return store.completeResult, store.completeErr
+}
+
 type recordingBlobStore struct {
 	putCalls     int
 	putKey       blobstore.Key
@@ -489,7 +605,7 @@ func newTestService(t *testing.T, store ingestionStore, authorizer Authorizer) *
 	service, err := NewService(store, &recordingBlobStore{statErr: blobstore.ErrNotFound}, authorizer, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
-		StorageBackend: "test",
+		StorageBackend: "test", ProcessMaxAttempts: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -508,6 +624,13 @@ func validUploadRequest(content string) UploadRequest {
 	return UploadRequest{
 		PrincipalID: "principal-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
 		ImportID: "import-a", Content: strings.NewReader(content),
+	}
+}
+
+func validCompleteRequest() CompleteRequest {
+	return CompleteRequest{
+		PrincipalID: "principal-a", WorkspaceID: "workspace-a", ApplicationID: "application-a",
+		ImportID: "import-a", IdempotencyKey: "complete-1",
 	}
 }
 
@@ -535,7 +658,7 @@ func newUploadTestService(
 	service, err := NewService(store, blobs, authorizer, Config{
 		MaxUploadBytes: 100 << 20, UploadReservationTTL: 30 * time.Minute,
 		UploadTimeout: time.Minute, IdempotencyRetention: 24 * time.Hour,
-		StorageBackend: "test",
+		StorageBackend: "test", ProcessMaxAttempts: 3,
 	})
 	if err != nil {
 		t.Fatal(err)

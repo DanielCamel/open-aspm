@@ -35,6 +35,7 @@ type ingestionStore interface {
 	BeginUpload(context.Context, beginUploadSpec) (uploadSession, error)
 	CommitUpload(context.Context, commitUploadSpec) (UploadReceipt, error)
 	EndUpload(context.Context, endUploadSpec) error
+	Complete(context.Context, completeSpec) (Completion, error)
 }
 
 type blobWriter interface {
@@ -50,10 +51,11 @@ type Config struct {
 	UploadTimeout        time.Duration
 	IdempotencyRetention time.Duration
 	StorageBackend       string
+	ProcessMaxAttempts   int
 }
 
-// Service authorizes import reservation and raw-artifact upload through the
-// ingestion-owned store.
+// Service authorizes import reservation, raw-artifact upload, and asynchronous
+// completion through the ingestion-owned store.
 type Service struct {
 	store      ingestionStore
 	blobs      blobWriter
@@ -69,7 +71,8 @@ func NewService(store ingestionStore, blobs blobWriter, authorizer Authorizer, c
 	if store == nil || blobs == nil || authorizer == nil || config.MaxUploadBytes <= 0 ||
 		config.UploadReservationTTL <= 0 || config.UploadTimeout <= 0 ||
 		config.IdempotencyRetention < minimumRetention ||
-		!storageBackendPattern.MatchString(config.StorageBackend) {
+		!storageBackendPattern.MatchString(config.StorageBackend) ||
+		config.ProcessMaxAttempts < 1 || config.ProcessMaxAttempts > 100 {
 		return nil, ErrInvalid
 	}
 	return &Service{
@@ -81,6 +84,42 @@ func NewService(store ingestionStore, blobs blobWriter, authorizer Authorizer, c
 		},
 		newBlobKey: blobstore.NewKey,
 	}, nil
+}
+
+// Complete authorizes completeImport and atomically asks the ingestion store
+// to publish one queued public operation with its internal processing job.
+// Identical idempotency replays return the original operation.
+func (service *Service) Complete(ctx context.Context, request CompleteRequest) (Completion, error) {
+	if err := validateCompleteRequest(request); err != nil {
+		return Completion{}, err
+	}
+	if err := service.authorizer.Authorize(ctx, AuthorizationRequest{
+		PrincipalID: request.PrincipalID, WorkspaceID: request.WorkspaceID,
+		ApplicationID: request.ApplicationID, Capability: CapabilityImportsUpload,
+	}); err != nil {
+		return Completion{}, fmt.Errorf("authorize import completion: %w", err)
+	}
+	fingerprint, err := fingerprintCompletion(request)
+	if err != nil {
+		return Completion{}, err
+	}
+	operationID, err := service.randomIdentifier("op_")
+	if err != nil {
+		return Completion{}, err
+	}
+	now := service.timestamp()
+	return service.store.Complete(ctx, completeSpec{
+		Operation: Operation{
+			ID: operationID, WorkspaceID: request.WorkspaceID, ImportID: request.ImportID,
+			CreatedByPrincipalID: request.PrincipalID, Kind: importProcessKind,
+			State: OperationQueued, CreatedAt: now, UpdatedAt: now,
+		},
+		ApplicationID: request.ApplicationID, PrincipalID: request.PrincipalID,
+		APIMajorVersion:      apiMajorVersion,
+		IdempotencyOperation: operationCompleteImport, IdempotencyKey: request.IdempotencyKey,
+		RequestFingerprint: fingerprint, IdempotencyExpiresAt: now.Add(service.config.IdempotencyRetention),
+		ProcessMaxAttempts: service.config.ProcessMaxAttempts,
+	})
 }
 
 // Reserve authorizes createImport, validates its semantic request, and records
