@@ -341,7 +341,7 @@ func (q *Queue) Start(ctx context.Context, workspaceID, id, token string) error 
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE open_aspm.job_attempts AS attempt
-		SET started_at = COALESCE(started_at, now())
+		SET started_at = COALESCE(attempt.started_at, now())
 		FROM open_aspm.jobs AS job
 		WHERE job.workspace_id = $1 AND job.id = $2 AND job.lease_token_hash = $3
 		  AND attempt.workspace_id = job.workspace_id

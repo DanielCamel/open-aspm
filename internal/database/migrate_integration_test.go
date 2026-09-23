@@ -161,7 +161,8 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 
 	brokenFS := fstest.MapFS{
 		"migrations/00001_initial.sql": &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
-		"migrations/00002_broken.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
+		"migrations/00002_second.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT 1;\n")},
+		"migrations/00003_broken.sql":  &fstest.MapFile{Data: []byte("-- +goose Up\nSELECT * FROM open_aspm.table_that_does_not_exist;\n")},
 	}
 	migrator, err := newMigrator(db, fs.FS(brokenFS))
 	if err != nil {
@@ -174,7 +175,7 @@ func assertFailedMigrationDoesNotAdvanceVersion(t *testing.T, ctx context.Contex
 	if err != nil {
 		t.Fatalf("read status after failed migration: %v", err)
 	}
-	if status.Current != 1 || !status.Pending {
-		t.Fatalf("status after failed migration = %+v, want current 1 and pending", status)
+	if status.Current != 2 || !status.Pending {
+		t.Fatalf("status after failed migration = %+v, want current 2 and pending", status)
 	}
 }
