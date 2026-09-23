@@ -2,7 +2,9 @@
 
 The normative machine-readable contract is
 [`openapi.yaml`](openapi.yaml). It uses OpenAPI 3.1.1 and JSON Schema
-2020-12. No server implementation is included yet.
+2020-12. Internal reservation, upload, and completion application services are
+implemented, but the public ingestion HTTP routes and authentication path are
+not wired yet.
 
 ## Workflow
 

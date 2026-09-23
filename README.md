@@ -33,14 +33,44 @@ findings without replacing the scanners that discover them.
 
 ## Project status
 
-The architecture and domain model are under active design. The initial roadmap
-is tracked in [ROADMAP.md](ROADMAP.md). Public milestones and implementation
-issues will be added as the interfaces stabilize.
+Open ASPM is being built as a sequence of tested internal vertical slices.
+Implementation in the repository does not necessarily mean that a capability
+is reachable through the current command line or HTTP server.
+
+Implemented and tested internally:
+
+- explicit PostgreSQL migrations and a lease-fenced, at-least-once job queue;
+- filesystem and S3-compatible immutable BlobStore adapters;
+- application services for idempotent import reservation, bounded evidence
+  upload, and atomic `completeImport` queueing;
+- public asynchronous-operation persistence kept separate from internal queue
+  lease state; and
+- a bounded, deterministic, versioned SARIF 2.1.0 parser.
+
+Available to an operator today:
+
+- `open-aspm version`;
+- `open-aspm migrate status` and `open-aspm migrate up`; and
+- the loopback HTTP server with `/health/live` and `/health/ready` endpoints.
+
+Not yet available as an end-to-end user workflow:
+
+- authenticated ingestion HTTP routes from the published OpenAPI contract;
+- worker processing of queued `import.process` jobs;
+- durable Scan, Observation, normalization, correlation, and Finding state;
+- authorized ingestion and finding query APIs; and
+- the web interface.
+
+The architecture and domain model remain under active development. The initial
+direction is tracked in [ROADMAP.md](ROADMAP.md); observable behavior and tests,
+not roadmap text alone, determine whether a capability is complete.
 
 ## Development preview
 
-Open ASPM currently provides a minimal pre-alpha HTTP service. It does not yet
-ingest findings or expose an authenticated production API.
+Open ASPM currently provides operator commands and a minimal pre-alpha HTTP
+service. The HTTP service exposes health endpoints only; the implemented
+ingestion services and SARIF parser are not yet wired into public routes or a
+worker, and no authenticated production API is available.
 
 ```bash
 go run ./cmd/open-aspm version
@@ -61,6 +91,7 @@ be versioned in the repository alongside the implementation.
 - [System threat model](docs/threat-model/system.md)
 - [Test data policy](docs/testing/test-data-policy.md)
 - [Ingestion API v1 contract](docs/api/ingestion-v1.md)
+- [SARIF parser behavior](docs/parsing/sarif.md)
 - [Development guide](docs/development.md)
 - [Contributor tasks](CONTRIBUTOR_TASKS.md)
 
