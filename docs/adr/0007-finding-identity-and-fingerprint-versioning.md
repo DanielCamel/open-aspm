@@ -21,6 +21,12 @@ Finding identity is different from scan scope. A fingerprint associates an
 observation with a finding; scan scope determines whether a later scan may
 mark that finding absent.
 
+The current glossary uses "Finding identity" for the versioned deterministic
+value. This proposal separates two concepts that must not be interchangeable:
+the opaque Finding ID and the versioned correlation fingerprint. If this ADR
+is accepted, the glossary will be updated in the accepting change so clients
+and implementations do not use both meanings concurrently.
+
 ## Decision
 
 ### 1. Findings have opaque IDs
@@ -28,8 +34,10 @@ mark that finding absent.
 Every finding receives an immutable Open ASPM ID scoped to one workspace. The
 ID contains no scanner, asset, location, or vulnerability data.
 
-A fingerprint is a correlation key, not the finding ID. A finding may have
-more than one fingerprint over its lifetime.
+A fingerprint is a correlation key, not the Finding ID. A finding may have
+more than one fingerprint over its lifetime. Public contracts expose the
+opaque Finding ID; clients do not construct or select correlation
+fingerprints.
 
 ### 2. Source identity is preserved separately
 
@@ -41,6 +49,8 @@ Open ASPM derives its own fingerprint from normalized inputs:
 ```text
 FindingFingerprint
   workspace_id
+  target_type
+  target_id
   analysis_kind
   algorithm
   version
@@ -48,13 +58,16 @@ FindingFingerprint
   inputs
 ```
 
-The algorithm name and version are always stored with the digest. Fingerprints
-are compared only within the same workspace, analysis kind, algorithm, and
-version.
+The target is an opaque Open ASPM catalog identity, never a display name, URL,
+path, or provider locator. The algorithm name and version are always stored
+with the digest. Fingerprints are compared only within the same workspace,
+target type and identity, analysis kind, algorithm, and version.
 
-### 3. Version-one fingerprint inputs
+### 3. Version-one fingerprint families and inputs
 
-The initial deterministic fingerprints use these inputs:
+Fingerprint families are activated independently. A family may run only when
+all of its required normalized identities are available. The initial
+deterministic families use these inputs:
 
 ```text
 SAST
@@ -65,8 +78,8 @@ SAST
   stable source context
 
 SCA
-  component identity, or immutable artifact identity
-  package identity
+  selected target type and identity
+  version-independent package coordinate
   vulnerability identity
 
 Container
@@ -93,6 +106,21 @@ Scanner family is included where rule semantics are tool-specific. Version one
 does not automatically correlate SAST, DAST, or secret observations across
 different scanner families.
 
+For SCA, target selection has a fixed precedence. A known component identity
+is selected first. Otherwise, a known artifact with a verified immutable
+content identity is selected. When both exist, the component is the target and
+the artifact remains attributed evidence. When neither exists, correlation is
+`uncorrelated` rather than selecting a mutable locator.
+
+The version-one package coordinate is the server-normalized tuple of package
+ecosystem/type, namespace, and name. For a Package URL, `version`, `qualifiers`,
+and `subpath` are excluded. An observed package version and dependency path are
+also evidence, not part of this coordinate. If an ecosystem cannot distinguish
+packages safely without a qualifier, version one records the Observation as
+`uncorrelated` instead of dropping the qualifier and risking a merge. Direct
+versus transitive dependency is evidence rather than version-one finding
+identity. A change to these rules requires a new fingerprint version.
+
 ### 4. Mutable data is not identity
 
 The following values do not participate in version-one fingerprints:
@@ -105,9 +133,45 @@ The following values do not participate in version-one fingerprints:
 - workflow, triage, and lifecycle state;
 - raw secret value or a digest of that value.
 
-Paths and routes are normalized by versioned server-side code. When required
-identity input is missing, the observation remains stored but is not attached
-through an unreliable fallback.
+Paths and routes are normalized by versioned server-side code. Adapters retain
+and map source facts; they do not select fingerprint inputs, algorithms, or
+versions.
+
+When any required input is missing or unsafe, correlation records a durable,
+queryable outcome rather than using a weaker fallback:
+
+```text
+CorrelationOutcome
+  workspace_id
+  observation_id
+  algorithm
+  version
+  state: uncorrelated
+  reason_codes
+```
+
+Version one records every applicable code once in this canonical order:
+
+```text
+target_identity_unknown
+analysis_kind_unknown
+scanner_family_unknown
+rule_identity_unknown
+package_identity_unknown
+vulnerability_identity_unknown
+location_identity_unknown
+source_context_unknown
+source_context_unsafe
+```
+
+An algorithm family uses only the codes relevant to its required inputs. If an
+ecosystem-specific package qualifier is required to avoid conflation, it emits
+`package_identity_unknown`. The exact outcome key is workspace, Observation,
+algorithm, and version. Exact replay returns the existing outcome; conflicting
+replay is an error. An uncorrelated Observation does not create a stable
+Finding because its logical identity is not reproducible. Authorized evidence
+and review queries must surface it separately so unknown identity cannot hide
+a valid security statement.
 
 ### 5. Fingerprints are deterministic and explainable
 
@@ -116,13 +180,25 @@ canonical encoding, and test vectors. Version one uses SHA-256 over a canonical
 encoding of the typed inputs.
 
 The normalized inputs are retained so a match can be explained and reproduced.
-Untrusted report fields cannot choose an algorithm or its version.
+The algorithm contract defines an unambiguous typed canonical encoding and
+published test vectors; concatenating unescaped source strings is not a valid
+encoding. Untrusted report fields cannot choose an algorithm or its version.
+
+Secret correlation has an additional boundary. Stable source context is
+eligible only after secret-aware server canonicalization proves that it
+contains neither the raw secret nor a reversible or equality-testable
+derivative of it. A provider-issued opaque location key or syntax context that
+excludes the token may be eligible. Hashing the secret does not make it
+eligible. If safe context cannot be constructed, the outcome is
+`uncorrelated` with a `source_context_unsafe` reason. Disallowed values must not
+enter retained inputs, indexes, logs, metrics, errors, or diagnostics.
 
 ### 6. Collisions do not silently merge findings
 
-If the same fingerprint points to incompatible evidence, Open ASPM records a
-correlation conflict. It keeps the observations and does not automatically
-attach, discard, or merge them.
+If a digest matches but its retained canonical inputs do not match byte for
+byte, or an active fingerprint mapping points to incompatible target or
+finding records, Open ASPM records a correlation conflict. It keeps the
+observations and does not automatically attach, discard, or merge them.
 
 Concurrent creation of the same valid fingerprint must converge on one finding.
 Replaying an import or correlation job must not create duplicate findings or
@@ -202,7 +278,9 @@ that two scanners describe the same issue.
 ### Negative and trade-offs
 
 - Some real duplicates remain separate until an explicit alias or merge exists.
-- Adapters must implement and test normalization rules.
+- Adapters must preserve and deterministically map required source facts, while
+  versioned server normalization and correlation own canonicalization and
+  fingerprint construction.
 - Algorithm migration requires additional storage and review logic.
 
 ## Security and privacy impact
@@ -216,7 +294,10 @@ Fingerprint comparison is never an authorization check.
 
 ## Compatibility and migration
 
-Public APIs use the opaque finding ID. Clients do not construct fingerprints.
+Accepting this ADR requires updating the glossary definition of **Finding
+identity**. The replacement definitions distinguish **Finding ID** (the opaque
+managed identity) from **correlation fingerprint** (the versioned association
+key). That terminology update is not made while this ADR remains Proposed.
 
 Old and new fingerprint versions may coexist during migration. Before a new
 version is activated, its effect on unchanged, split, merged, conflicting, and
@@ -229,8 +310,17 @@ scanner changes, dependency upgrades, different image digests, route
 normalization, secret rotation, missing inputs, collisions, and migration
 between algorithm versions.
 
+SCA tests must cover component-over-artifact target precedence, absence of both
+target identities, version-independent package coordinates, and unchanged
+identity across direct/transitive dependency evidence. Missing-input tests must
+prove that the reason is queryable and replay-idempotent. Secret tests must
+prove that neither the secret nor a reversible or equality-testable derivative
+appears in retained inputs, indexes, logs, metrics, errors, or diagnostics.
+
 ## Open questions
 
+- Which authorized ingestion or catalog contract supplies the repository,
+  component, artifact, or deployment target for the first SARIF family? The
+  current import reservation supplies only an application identity.
 - Which SARIF partial fingerprints are stable enough for the first adapter?
-- Should SCA identity distinguish direct and transitive dependencies?
 - Which evidence is sufficient to create an automatic alias after a file rename?
