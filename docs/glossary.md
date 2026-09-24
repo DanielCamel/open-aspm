@@ -180,15 +180,23 @@ technical, triage, and workflow state.
 
 A SAST tool reports rule `SQL-001` at line 42 in three consecutive scans. Open
 ASPM stores three observations because each is evidence from a distinct scan.
-If their versioned identity inputs match, all three observations support one
-finding. A later compatible full scan with no matching observation may move the
-finding to `absent`; it does not delete the earlier observations.
+If their versioned correlation inputs match without a conflict, all three
+observations support one finding. A later compatible full scan with no matching
+observation may move the finding to `absent`; it does not delete the earlier
+observations.
 
-### Finding identity
+### Finding ID
 
-The versioned, deterministic identity used to associate observations with a
-finding. It contains the fingerprint algorithm name and version, not only an
-opaque digest.
+The immutable, opaque Open ASPM identifier of a managed Finding. It is scoped
+to one workspace and contains no scanner, asset, location, or vulnerability
+meaning. Algorithm changes do not replace it.
+
+### Correlation fingerprint
+
+The deterministic, versioned key used to associate compatible Observations
+with a Finding. It retains the algorithm name, version, digest, and normalized
+inputs needed to explain the match. It is not a Finding ID, a scanner-provided
+fingerprint, or an authorization credential.
 
 ### Evidence
 

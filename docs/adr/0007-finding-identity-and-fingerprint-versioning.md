@@ -1,6 +1,6 @@
 # ADR-0007: Finding identity and fingerprint versioning
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-22
 - **Owners:** Open ASPM maintainers
 - **Related issues:** ADR-003 in [CONTRIBUTOR_TASKS.md](../../CONTRIBUTOR_TASKS.md)
@@ -17,15 +17,15 @@ stable Open ASPM identity. Their meaning and lifetime differ between scanners
 and may change after a scanner or parser upgrade. Mutable values such as line
 numbers, severity, and message text are also unsuitable as identity.
 
-Finding identity is different from scan scope. A fingerprint associates an
-observation with a finding; scan scope determines whether a later scan may
+Correlation identity is different from scan scope. A fingerprint associates
+an observation with a finding; scan scope determines whether a later scan may
 mark that finding absent.
 
-The current glossary uses "Finding identity" for the versioned deterministic
-value. This proposal separates two concepts that must not be interchangeable:
-the opaque Finding ID and the versioned correlation fingerprint. If this ADR
-is accepted, the glossary will be updated in the accepting change so clients
-and implementations do not use both meanings concurrently.
+The previous glossary used "Finding identity" for the versioned deterministic
+value. This decision separates two concepts that must not be interchangeable:
+the opaque Finding ID and the versioned correlation fingerprint. The glossary
+is updated in the accepting change so clients and implementations do not use
+both meanings concurrently.
 
 ## Decision
 
@@ -294,10 +294,8 @@ Fingerprint comparison is never an authorization check.
 
 ## Compatibility and migration
 
-Accepting this ADR requires updating the glossary definition of **Finding
-identity**. The replacement definitions distinguish **Finding ID** (the opaque
-managed identity) from **correlation fingerprint** (the versioned association
-key). That terminology update is not made while this ADR remains Proposed.
+The glossary definitions distinguish **Finding ID** (the opaque managed
+identity) from **correlation fingerprint** (the versioned association key).
 
 Old and new fingerprint versions may coexist during migration. Before a new
 version is activated, its effect on unchanged, split, merged, conflicting, and

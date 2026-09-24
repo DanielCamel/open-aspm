@@ -145,7 +145,7 @@ other's tables.
 | Integrations | Connector configuration, credentials references, health, and scheduling |
 | Ingestion | Upload sessions, idempotency, raw artifacts, imports, and scan metadata |
 | Parsing | Versioned adapters for SARIF, CycloneDX, and vendor formats |
-| Findings | Observations, finding identity, technical lifecycle, and history |
+| Findings | Observations, Findings, opaque Finding IDs, technical lifecycle, and history |
 | Correlation | Deterministic fingerprints, aliases, grouping, and duplicate relations |
 | Intelligence | Vulnerability records, aliases, affected ranges, and enrichment snapshots |
 | Risk | Versioned risk calculations with explainable factors |
@@ -294,8 +294,8 @@ Secret:    repository identity + secret type + location fingerprint
 ```
 
 Each stored fingerprint includes an algorithm name and version. Changing an
-algorithm creates an explicit migration or alias; it never silently rewrites
-finding identity.
+algorithm creates an explicit migration or alias; it never silently changes
+Finding membership or replaces opaque Finding IDs.
 
 Machine-learning or fuzzy correlation may later propose relationships, but it
 must not silently merge findings without an explainable decision and an audit

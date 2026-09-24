@@ -75,7 +75,4 @@ Use [template.md](template.md) when proposing a decision.
 - [0004: Initial authorization model](0004-initial-authorization-model.md)
 - [0005: Raw artifact storage and retention](0005-raw-artifact-storage-and-retention.md)
 - [0006: PostgreSQL access and schema migrations](0006-postgresql-access-and-migrations.md)
-
-## Proposed decisions
-
 - [0007: Finding identity and fingerprint versioning](0007-finding-identity-and-fingerprint-versioning.md)

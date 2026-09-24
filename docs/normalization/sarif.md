@@ -2,7 +2,8 @@
 
 The first normalization adapter converts the supported source-oriented SARIF
 Observation into a bounded Open ASPM representation. It is deterministic and
-does not create Finding identity, effective severity, risk, or lifecycle state.
+does not create Findings, correlation fingerprints, effective severity, risk,
+or lifecycle state.
 
 ## Identity and compatibility
 
