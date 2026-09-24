@@ -79,7 +79,8 @@ One conformance suite runs unchanged against both adapters. It covers streaming
 content larger than internal buffers, write/read SHA-256, byte and time limits,
 expected-digest mismatch, duplicate writes, guarded and idempotent delete, and
 metadata consistency. Adapter-specific tests cover filesystem symlinks and
-corruption plus S3 corruption against an isolated pinned MinIO image.
+corruption plus S3 corruption against isolated MinIO built from a pinned
+upstream source revision.
 
 Run the filesystem suite with the ordinary checks:
 
