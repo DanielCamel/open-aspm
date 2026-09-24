@@ -750,6 +750,7 @@ func openReservationService(t *testing.T) (*Service, *sql.DB) {
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_locations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO %s", runtimeIdentifier),
 	}

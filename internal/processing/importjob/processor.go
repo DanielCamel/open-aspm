@@ -33,8 +33,13 @@ type scanRecorder interface {
 	RecordScan(context.Context, ingestion.ScanSpec) (ingestion.StoredScan, error)
 }
 
-type observationRecorder interface {
+type observationStore interface {
 	RecordObservation(context.Context, finding.ObservationSpec) (finding.StoredObservation, error)
+	RecordNormalization(context.Context, finding.NormalizationSpec) (finding.StoredNormalization, error)
+}
+
+type observationNormalizer interface {
+	Normalize(finding.ObservationSpec, time.Time) (finding.NormalizationSpec, error)
 }
 
 type blobReader interface {
@@ -55,9 +60,10 @@ type Config struct {
 type Processor struct {
 	store        processingStore
 	scans        scanRecorder
-	observations observationRecorder
+	observations observationStore
 	blobs        blobReader
 	parser       sarifParser
+	normalizer   observationNormalizer
 	authorizer   ingestion.Authorizer
 	config       Config
 	now          func() time.Time
@@ -67,19 +73,21 @@ type Processor struct {
 func New(
 	store processingStore,
 	scans scanRecorder,
-	observations observationRecorder,
+	observations observationStore,
 	blobs blobReader,
 	parser sarifParser,
+	normalizer observationNormalizer,
 	authorizer ingestion.Authorizer,
 	config Config,
 ) (*Processor, error) {
-	if store == nil || scans == nil || observations == nil || blobs == nil || parser == nil || authorizer == nil ||
+	if store == nil || scans == nil || observations == nil || blobs == nil || parser == nil || normalizer == nil ||
+		authorizer == nil ||
 		config.StorageBackend == "" || config.ProcessingTimeout <= 0 || config.RetryMaximumAge <= 0 {
 		return nil, errors.New("invalid import processor configuration")
 	}
 	return &Processor{
 		store: store, scans: scans, observations: observations, blobs: blobs,
-		parser: parser, authorizer: authorizer, config: config,
+		parser: parser, normalizer: normalizer, authorizer: authorizer, config: config,
 		now: time.Now,
 		random: func(buffer []byte) error {
 			_, err := rand.Read(buffer)
@@ -89,7 +97,7 @@ func New(
 }
 
 // Handle validates the internal queue contract, reauthorizes the delayed work,
-// verifies immutable evidence, and persists deterministic parser output.
+// verifies immutable evidence, and persists deterministic parsed and normalized output.
 func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobqueue.Outcome {
 	identity, err := decodeJob(job)
 	if err != nil {
@@ -196,10 +204,8 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 			if err != nil {
 				return processor.retry(job, identity, "identifier-generation-failed", "A secure record identifier could not be generated")
 			}
-			_, err = processor.observations.RecordObservation(
-				ctx,
-				mapObservation(source, document, storedScan.ID, result, observationID, recordedAt),
-			)
+			observation := mapObservation(source, document, storedScan.ID, result, observationID, recordedAt)
+			storedObservation, err := processor.observations.RecordObservation(ctx, observation)
 			if err != nil {
 				if errors.Is(err, finding.ErrObservationConflict) {
 					return processor.permanent(identity, "observation-output-conflict", "Observation output conflicts with retained history")
@@ -208,6 +214,24 @@ func (processor *Processor) Handle(ctx context.Context, job jobqueue.Job) jobque
 					return processor.permanent(identity, "observation-output-invalid", "Observation output is outside supported limits")
 				}
 				return processor.retry(job, identity, "database-unavailable", "Observation output could not be stored")
+			}
+			observation.ID = storedObservation.ID
+			normalized, err := processor.normalizer.Normalize(
+				observation,
+				processor.timestamp(storedObservation.RecordedAt),
+			)
+			if err != nil {
+				return processor.permanent(identity, "normalization-output-invalid", "Observation normalization failed")
+			}
+			if _, err := processor.observations.RecordNormalization(ctx, normalized); err != nil {
+				switch {
+				case errors.Is(err, finding.ErrNormalizationConflict):
+					return processor.permanent(identity, "normalization-output-conflict", "Normalization output conflicts with retained history")
+				case errors.Is(err, finding.ErrNormalizationInvalid), errors.Is(err, finding.ErrObservationNotFound):
+					return processor.permanent(identity, "normalization-output-invalid", "Normalization output is outside supported limits")
+				default:
+					return processor.retry(job, identity, "database-unavailable", "Normalization output could not be stored")
+				}
 			}
 		}
 	}

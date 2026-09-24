@@ -120,7 +120,45 @@ func TestImmutableScanAndObservationPersistence(t *testing.T) {
 		t.Fatalf("conflicting RecordObservation() error = %v, want ErrObservationConflict", err)
 	}
 
-	var observations, locations, fingerprints int
+	normalizationSpec := finding.NormalizationSpec{
+		WorkspaceID: request.WorkspaceID, ObservationID: storedObservation.ID,
+		NormalizerName: "sarif", NormalizerVersion: "1",
+		Category: finding.CategoryUnknown, Severity: finding.SeverityHigh,
+		RuleKind: finding.RuleSource, RuleID: observationSpec.SourceRuleID,
+		Location: finding.NormalizedLocation{
+			Kind: finding.LocationArtifact, URI: "src/example.go", StartLine: &line,
+		},
+		NormalizedAt: recordedAt.Add(time.Second),
+	}
+	storedNormalization, err := observationStore.RecordNormalization(context.Background(), normalizationSpec)
+	if err != nil {
+		t.Fatalf("RecordNormalization() error = %v", err)
+	}
+	if !storedNormalization.Created || storedNormalization.ObservationID != storedObservation.ID {
+		t.Fatalf("RecordNormalization() = %+v, want newly created normalization", storedNormalization)
+	}
+	replayedNormalizationSpec := normalizationSpec
+	replayedNormalizationSpec.NormalizedAt = normalizationSpec.NormalizedAt.Add(time.Minute)
+	replayedNormalization, err := observationStore.RecordNormalization(context.Background(), replayedNormalizationSpec)
+	if err != nil {
+		t.Fatalf("RecordNormalization() replay error = %v", err)
+	}
+	if replayedNormalization.Created || !replayedNormalization.NormalizedAt.Equal(normalizationSpec.NormalizedAt) {
+		t.Fatalf("RecordNormalization() replay = %+v, want retained immutable normalization", replayedNormalization)
+	}
+	conflictingNormalization := replayedNormalizationSpec
+	conflictingNormalization.Severity = finding.SeverityMedium
+	if _, err := observationStore.RecordNormalization(context.Background(), conflictingNormalization); !errors.Is(err, finding.ErrNormalizationConflict) {
+		t.Fatalf("conflicting RecordNormalization() error = %v, want ErrNormalizationConflict", err)
+	}
+	newVersionNormalization := conflictingNormalization
+	newVersionNormalization.NormalizerVersion = "2"
+	newVersion, err := observationStore.RecordNormalization(context.Background(), newVersionNormalization)
+	if err != nil || !newVersion.Created {
+		t.Fatalf("new-version RecordNormalization() = %+v, %v; want independent version", newVersion, err)
+	}
+
+	var observations, locations, fingerprints, normalizations int
 	if err := db.QueryRow(`SELECT count(*) FROM open_aspm.observations WHERE workspace_id = $1`, request.WorkspaceID).
 		Scan(&observations); err != nil {
 		t.Fatal(err)
@@ -133,15 +171,22 @@ func TestImmutableScanAndObservationPersistence(t *testing.T) {
 		Scan(&fingerprints); err != nil {
 		t.Fatal(err)
 	}
-	if observations != 1 || locations != 1 || fingerprints != 2 {
-		t.Fatalf("stored rows = observations %d, locations %d, fingerprints %d; want 1, 1, 2",
-			observations, locations, fingerprints)
+	if err := db.QueryRow(`SELECT count(*) FROM open_aspm.observation_normalizations WHERE workspace_id = $1`, request.WorkspaceID).
+		Scan(&normalizations); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 1 || locations != 1 || fingerprints != 2 || normalizations != 2 {
+		t.Fatalf("stored rows = observations %d, locations %d, fingerprints %d, normalizations %d; want 1, 1, 2, 2",
+			observations, locations, fingerprints, normalizations)
 	}
 	if _, err := db.Exec(`UPDATE open_aspm.observations SET message_text = 'changed' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable observations")
 	}
 	if _, err := db.Exec(`UPDATE open_aspm.scans SET result = 'succeeded' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable scans")
+	}
+	if _, err := db.Exec(`UPDATE open_aspm.observation_normalizations SET severity = 'critical' WHERE workspace_id = $1`, request.WorkspaceID); err == nil {
+		t.Fatal("runtime role unexpectedly updated immutable normalizations")
 	}
 }
 
@@ -260,10 +305,59 @@ func TestConcurrentReplayAndWorkspaceIsolation(t *testing.T) {
 	if created != 1 {
 		t.Fatalf("concurrent observation creations = %d, want 1", created)
 	}
+	normalizationResults := make(chan finding.StoredNormalization, workers)
+	normalizationErrors := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			stored, err := observationStore.RecordNormalization(context.Background(), finding.NormalizationSpec{
+				WorkspaceID: request.WorkspaceID, ObservationID: authoritativeObservationID,
+				NormalizerName: "sarif", NormalizerVersion: "1",
+				Category: finding.CategoryUnknown, Severity: finding.SeverityUnknown,
+				RuleKind:     finding.RuleUnknown,
+				Location:     finding.NormalizedLocation{Kind: finding.LocationUnknown},
+				NormalizedAt: receivedAt.Add(2 * time.Second),
+			})
+			if err != nil {
+				normalizationErrors <- err
+				return
+			}
+			normalizationResults <- stored
+		}()
+	}
+	wait.Wait()
+	close(normalizationResults)
+	close(normalizationErrors)
+	for err := range normalizationErrors {
+		t.Errorf("concurrent RecordNormalization() error = %v", err)
+	}
+	created = 0
+	for result := range normalizationResults {
+		if result.ObservationID != authoritativeObservationID {
+			t.Fatalf("concurrent normalization observation ID = %q", result.ObservationID)
+		}
+		if result.Created {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("concurrent normalization creations = %d, want 1", created)
+	}
 	crossWorkspace := baseObservation
 	crossWorkspace.ID = "observation-cross-workspace"
 	crossWorkspace.WorkspaceID = "workspace-b"
 	if _, err := observationStore.RecordObservation(context.Background(), crossWorkspace); !errors.Is(err, finding.ErrScanNotFound) {
 		t.Fatalf("cross-workspace RecordObservation() error = %v, want ErrScanNotFound", err)
+	}
+	if _, err := observationStore.RecordNormalization(context.Background(), finding.NormalizationSpec{
+		WorkspaceID: "workspace-b", ObservationID: authoritativeObservationID,
+		NormalizerName: "sarif", NormalizerVersion: "1",
+		Category: finding.CategoryUnknown, Severity: finding.SeverityUnknown,
+		RuleKind:     finding.RuleUnknown,
+		Location:     finding.NormalizedLocation{Kind: finding.LocationUnknown},
+		NormalizedAt: receivedAt.Add(2 * time.Second),
+	}); !errors.Is(err, finding.ErrObservationNotFound) {
+		t.Fatalf("cross-workspace RecordNormalization() error = %v, want ErrObservationNotFound", err)
 	}
 }

@@ -68,6 +68,7 @@ GRANT SELECT, INSERT ON open_aspm.scan_scopes TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_locations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.observation_fingerprints TO open_aspm_runtime;
+GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_outputs TO open_aspm_runtime;
 GRANT SELECT, INSERT ON open_aspm.import_parse_warnings TO open_aspm_runtime;
 ```
@@ -99,6 +100,15 @@ interfaces. Exact job replay returns the retained domain result. Malformed or
 unsupported evidence produces a stable sanitized terminal failure; transient
 database, authorization-backend, and BlobStore failures remain retryable until
 the job's attempt or age limit is reached.
+
+After each immutable Observation is stored, the handler applies the explicit
+SARIF normalization version and records a separate immutable normalization.
+Source severity remains on the Observation; normalized severity, an explicitly
+unknown category, the retained source rule key, and the bounded primary
+artifact location remain attributable to the normalizer version. Exact replay
+does not duplicate output, and a future version may coexist without rewriting
+the earlier interpretation. Finding correlation and effective severity are not
+implemented by this stage.
 
 This handler is implemented and tested internally, but no `open-aspm worker`
 command or deployment configuration is available yet. Runtime registration,

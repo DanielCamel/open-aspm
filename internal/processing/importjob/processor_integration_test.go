@@ -22,6 +22,7 @@ import (
 	"github.com/spectremi/open-aspm/internal/finding"
 	"github.com/spectremi/open-aspm/internal/ingestion"
 	"github.com/spectremi/open-aspm/internal/jobqueue"
+	sarifnormalization "github.com/spectremi/open-aspm/internal/normalization/sarif"
 	"github.com/spectremi/open-aspm/internal/parsing/sarif"
 )
 
@@ -66,12 +67,13 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 
 	counts := map[string]int{}
 	for name, query := range map[string]string{
-		"parse_outputs": `SELECT count(*) FROM open_aspm.import_parse_outputs WHERE workspace_id = $1 AND import_id = $2`,
-		"warnings":      `SELECT count(*) FROM open_aspm.import_parse_warnings WHERE workspace_id = $1 AND import_id = $2`,
-		"scans":         `SELECT count(*) FROM open_aspm.scans WHERE workspace_id = $1 AND import_id = $2`,
-		"observations":  `SELECT count(*) FROM open_aspm.observations AS observation JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
-		"locations":     `SELECT count(*) FROM open_aspm.observation_locations AS location JOIN open_aspm.observations AS observation ON observation.workspace_id = location.workspace_id AND observation.id = location.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
-		"fingerprints":  `SELECT count(*) FROM open_aspm.observation_fingerprints AS fingerprint JOIN open_aspm.observations AS observation ON observation.workspace_id = fingerprint.workspace_id AND observation.id = fingerprint.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"parse_outputs":  `SELECT count(*) FROM open_aspm.import_parse_outputs WHERE workspace_id = $1 AND import_id = $2`,
+		"warnings":       `SELECT count(*) FROM open_aspm.import_parse_warnings WHERE workspace_id = $1 AND import_id = $2`,
+		"scans":          `SELECT count(*) FROM open_aspm.scans WHERE workspace_id = $1 AND import_id = $2`,
+		"observations":   `SELECT count(*) FROM open_aspm.observations AS observation JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"normalizations": `SELECT count(*) FROM open_aspm.observation_normalizations AS normalization JOIN open_aspm.observations AS observation ON observation.workspace_id = normalization.workspace_id AND observation.id = normalization.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"locations":      `SELECT count(*) FROM open_aspm.observation_locations AS location JOIN open_aspm.observations AS observation ON observation.workspace_id = location.workspace_id AND observation.id = location.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
+		"fingerprints":   `SELECT count(*) FROM open_aspm.observation_fingerprints AS fingerprint JOIN open_aspm.observations AS observation ON observation.workspace_id = fingerprint.workspace_id AND observation.id = fingerprint.observation_id JOIN open_aspm.scans AS scan ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id WHERE scan.workspace_id = $1 AND scan.import_id = $2`,
 	} {
 		var count int
 		if err := harness.db.QueryRow(query, job.WorkspaceID, importIDFromJob(t, job)).Scan(&count); err != nil {
@@ -80,8 +82,32 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 		counts[name] = count
 	}
 	if counts["parse_outputs"] != 1 || counts["warnings"] == 0 || counts["scans"] != 2 ||
-		counts["observations"] != 3 || counts["locations"] != 2 || counts["fingerprints"] != 3 {
+		counts["observations"] != 3 || counts["normalizations"] != 3 ||
+		counts["locations"] != 2 || counts["fingerprints"] != 3 {
 		t.Fatalf("persisted counts = %+v", counts)
+	}
+	var supportedMappings int
+	if err := harness.db.QueryRow(`
+		SELECT count(*)
+		FROM open_aspm.observation_normalizations AS normalization
+		JOIN open_aspm.observations AS observation
+		  ON observation.workspace_id = normalization.workspace_id
+		 AND observation.id = normalization.observation_id
+		JOIN open_aspm.scans AS scan
+		  ON scan.workspace_id = observation.workspace_id AND scan.id = observation.scan_id
+		WHERE scan.workspace_id = $1 AND scan.import_id = $2
+		  AND normalization.normalizer_name = 'sarif'
+		  AND normalization.normalizer_version = '1'
+		  AND normalization.category = 'unknown'
+		  AND (
+		    (observation.source_level = 'warning' AND normalization.severity = 'medium') OR
+		    (observation.source_level = 'note' AND normalization.severity = 'low') OR
+		    (observation.source_level IS NULL AND normalization.severity = 'unknown')
+		  )`, job.WorkspaceID, importIDFromJob(t, job)).Scan(&supportedMappings); err != nil {
+		t.Fatal(err)
+	}
+	if supportedMappings != 3 {
+		t.Fatalf("supported source-to-normalized severity mappings = %d, want 3", supportedMappings)
 	}
 	var nonUnknown int
 	if err := harness.db.QueryRow(`
@@ -99,6 +125,11 @@ func TestImportProcessorPersistsAndReplaysSARIF(t *testing.T) {
 		UPDATE open_aspm.import_parse_outputs SET warnings_truncated = true
 		WHERE workspace_id = $1 AND import_id = $2`, job.WorkspaceID, importIDFromJob(t, job)); err == nil {
 		t.Fatal("runtime role unexpectedly updated immutable parser output")
+	}
+	if _, err := harness.db.Exec(`
+		UPDATE open_aspm.observation_normalizations SET severity = 'critical'
+		WHERE workspace_id = $1`, job.WorkspaceID); err == nil {
+		t.Fatal("runtime role unexpectedly updated immutable normalization output")
 	}
 }
 
@@ -232,6 +263,7 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_create_idempotency, open_aspm.import_complete_idempotency, open_aspm.jobs TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.scans, open_aspm.scan_scopes TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observations, open_aspm.observation_locations, open_aspm.observation_fingerprints TO %s", runtimeIdentifier),
+		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.observation_normalizations TO %s", runtimeIdentifier),
 		fmt.Sprintf("GRANT SELECT, INSERT ON open_aspm.import_parse_outputs, open_aspm.import_parse_warnings TO %s", runtimeIdentifier),
 	}
 	for _, grant := range grants {
@@ -273,7 +305,7 @@ func openProcessorHarness(t *testing.T) *processorHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	processor, err := New(store, store, observationStore, blobs, parser, authorizer, Config{
+	processor, err := New(store, store, observationStore, blobs, parser, sarifnormalization.New(), authorizer, Config{
 		StorageBackend: "filesystem-test", ProcessingTimeout: time.Minute, RetryMaximumAge: time.Hour,
 	})
 	if err != nil {
