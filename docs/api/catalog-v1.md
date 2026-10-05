@@ -1,9 +1,9 @@
 # Catalog API v1 contract
 
 The normative machine-readable contract is
-[`openapi.yaml`](openapi.yaml). The initial Catalog application services and
-PostgreSQL persistence are implemented, but these authenticated HTTP routes
-are not wired into the current server yet.
+[`openapi.yaml`](openapi.yaml). Repository creation is available through the
+authenticated HTTP server. Application-to-Repository linking remains an
+implemented internal service that is not wired into the server yet.
 
 ## Purpose and workflow
 

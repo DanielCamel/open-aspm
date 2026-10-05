@@ -141,8 +141,8 @@ Repository creation and linking separately, permits duplicate display names,
 and enforces create idempotency and one active relationship through durable
 database constraints. Runtime roles can insert and read this first slice but
 cannot update or delete it; rename and relationship-end operations are not yet
-implemented. The Catalog service is internal until authenticated HTTP routes
-are added.
+implemented. Authenticated Repository creation is exposed over HTTP;
+Application-to-Repository linking remains internal.
 
 An optional immutable Import analysis context can retain the exact active
 Application-to-Repository relationship, asserting principal, assertion source,
@@ -157,9 +157,10 @@ Its evaluator denies unknown, inactive, expired, revoked, cross-workspace, and
 out-of-scope decisions and treats token scope only as a restriction on current
 role grants. The authentication service generates 256-bit token secrets,
 stores only versioned HMAC verifier material, verifies credentials in constant
-time, and conditionally records use while a token remains active. HTTP
-integration and general operator-facing identity management are not implemented
-by this stage.
+time, and conditionally records use while a token remains active. The HTTP
+server authenticates API tokens and applies their capability scope to
+Repository creation. General operator-facing identity management is not
+implemented by this stage.
 
 ## Initial operator bootstrap
 
@@ -230,17 +231,34 @@ safety requirements.
 
 ```bash
 go run ./cmd/open-aspm version
-go run ./cmd/open-aspm server
+OPEN_ASPM_DATABASE_URL='postgres://open_aspm_runtime:password@localhost/open_aspm?sslmode=require' \
+OPEN_ASPM_TOKEN_VERIFIER_KEY_ID='bootstrap-v1' \
+OPEN_ASPM_TOKEN_VERIFIER_KEY='<the same verifier key used for bootstrap>' \
+  go run ./cmd/open-aspm server
 ```
 
-The server listens on `127.0.0.1:8080` by default. This loopback default avoids
-accidentally exposing an unauthenticated pre-alpha service.
+The server listens on `127.0.0.1:8080` by default. Use a dedicated runtime
+database role and the same verifier-key version that created active API tokens.
+The verifier key is a secret and must not be passed as a command-line flag.
 
 Check its initial health endpoints:
 
 ```bash
 curl --fail http://127.0.0.1:8080/health/live
 curl --fail http://127.0.0.1:8080/health/ready
+```
+
+Create a Repository with the one-time token returned by `bootstrap init` or
+`bootstrap token`:
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer ${OPEN_ASPM_API_TOKEN}" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: repository-example-1' \
+  --data '{"display_name":"example-service"}' \
+  "http://127.0.0.1:8080/api/v1/workspaces/${OPEN_ASPM_WORKSPACE_ID}/repositories"
 ```
 
 To use another address explicitly:

@@ -73,13 +73,15 @@ Available to an operator today:
 - `open-aspm version`;
 - `open-aspm migrate status` and `open-aspm migrate up`;
 - `open-aspm bootstrap init` and `open-aspm bootstrap token` for initial
-  single-workspace provisioning and operator-token recovery; and
-- the loopback HTTP server with `/health/live` and `/health/ready` endpoints.
+  single-workspace provisioning and operator-token recovery;
+- the loopback HTTP server with `/health/live` and `/health/ready` endpoints;
+  and
+- authenticated, idempotent Repository creation through the Catalog API.
 
 Not yet available as an end-to-end user workflow:
 
 - authenticated ingestion HTTP routes from the published OpenAPI contract;
-- authenticated Catalog HTTP routes for Repository provisioning and linking;
+- the authenticated Catalog route for Application-to-Repository linking;
 - runtime registration and an operator command for the import worker;
 - successful fingerprint correlation and durable Finding state;
 - authorized ingestion and finding query APIs; and
@@ -92,14 +94,16 @@ not roadmap text alone, determine whether a capability is complete.
 ## Development preview
 
 Open ASPM currently provides operator commands and a minimal pre-alpha HTTP
-service. The HTTP service exposes health endpoints only; the implemented
-ingestion services and import processing handler are not yet wired into public
-routes or a runnable worker command, and no authenticated production API is
-available.
+service. The service exposes health endpoints and authenticated Repository
+creation. The remaining Catalog and ingestion services and import processing
+handler are not yet wired into public routes or a runnable worker command.
 
 ```bash
 go run ./cmd/open-aspm version
-go run ./cmd/open-aspm server
+OPEN_ASPM_DATABASE_URL='postgres://open_aspm_runtime:password@localhost/open_aspm?sslmode=require' \
+OPEN_ASPM_TOKEN_VERIFIER_KEY_ID='bootstrap-v1' \
+OPEN_ASPM_TOKEN_VERIFIER_KEY='<unpadded base64url verifier key>' \
+  go run ./cmd/open-aspm server
 ```
 
 See the [development guide](docs/development.md) for prerequisites, verification

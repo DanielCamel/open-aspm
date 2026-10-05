@@ -175,22 +175,30 @@ func TestRunServerRejectsInvalidShutdownTimeout(t *testing.T) {
 	}
 }
 
-func TestRunServerLogsStartupFailureAsJSON(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	exitCode := Run(
-		context.Background(),
-		[]string{"server", "--listen=not-an-address"},
-		&stdout,
-		&stderr,
-		slog.New(slog.NewJSONHandler(&stderr, nil)),
-	)
-
-	if exitCode != exitFailure {
-		t.Fatalf("Run() exit code = %d, want %d", exitCode, exitFailure)
-	}
-	if !strings.Contains(stderr.String(), `"msg":"server failed"`) {
-		t.Fatalf("Run() stderr = %q, want structured startup error", stderr.String())
-	}
+func TestRunServerRequiresRuntimeConfiguration(t *testing.T) {
+	t.Run("database URL", func(t *testing.T) {
+		t.Setenv("OPEN_ASPM_DATABASE_URL", "")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(
+			context.Background(), []string{"server"}, &stdout, &stderr,
+			slog.New(slog.NewJSONHandler(&stderr, nil)),
+		)
+		if exitCode != exitUsage || !strings.Contains(stderr.String(), "OPEN_ASPM_DATABASE_URL is required") {
+			t.Fatalf("Run() = %d, stderr %q", exitCode, stderr.String())
+		}
+	})
+	t.Run("verifier key", func(t *testing.T) {
+		t.Setenv("OPEN_ASPM_DATABASE_URL", "postgres://example.invalid/open_aspm")
+		t.Setenv("OPEN_ASPM_TOKEN_VERIFIER_KEY", "not-a-valid-key")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(
+			context.Background(), []string{"server"}, &stdout, &stderr,
+			slog.New(slog.NewJSONHandler(&stderr, nil)),
+		)
+		if exitCode != exitUsage || !strings.Contains(stderr.String(), "at least 32 bytes") {
+			t.Fatalf("Run() = %d, stderr %q", exitCode, stderr.String())
+		}
+	})
 }

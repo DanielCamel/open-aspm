@@ -73,14 +73,8 @@ func runBootstrap(
 		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_DATABASE_URL is required")
 		return exitUsage
 	}
-	keyID := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY_ID")
-	if keyID == "" {
-		keyID = "bootstrap-v1"
-	}
-	encodedKey := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY")
-	key, err := base64.RawURLEncoding.DecodeString(encodedKey)
-	if err != nil || len(key) < 32 {
-		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_TOKEN_VERIFIER_KEY must be unpadded base64url encoding of at least 32 bytes")
+	authenticationConfig, ok := readAuthenticationConfig(stderr)
+	if !ok {
 		return exitUsage
 	}
 	db, err := database.Connect(ctx, databaseURL)
@@ -98,9 +92,7 @@ func runBootstrap(
 		logger.Error("bootstrap authentication setup failed", "error", err)
 		return exitFailure
 	}
-	tokenService, err := authentication.NewService(authenticationStore, authentication.Config{
-		ActiveKeyID: keyID, Keys: map[string][]byte{keyID: key},
-	})
+	tokenService, err := authentication.NewService(authenticationStore, authenticationConfig)
 	if err != nil {
 		logger.Error("bootstrap token configuration failed", "error", err)
 		return exitFailure
@@ -220,13 +212,54 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, logger *slo
 		_, _ = fmt.Fprintln(stderr, "shutdown-timeout must be greater than zero")
 		return exitUsage
 	}
+	databaseURL := os.Getenv("OPEN_ASPM_DATABASE_URL")
+	if databaseURL == "" {
+		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_DATABASE_URL is required")
+		return exitUsage
+	}
+	authenticationConfig, ok := readAuthenticationConfig(stderr)
+	if !ok {
+		return exitUsage
+	}
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		logger.Error("server database connection failed", "error", err)
+		return exitFailure
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Warn("server database close failed", "error", err)
+		}
+	}()
+	handler, err := server.NewRuntimeHandler(db, authenticationConfig, logger)
+	if err != nil {
+		logger.Error("server runtime setup failed", "error", err)
+		return exitFailure
+	}
 
-	if err := server.Run(ctx, config, logger); err != nil {
+	if err := server.Run(ctx, config, handler, logger); err != nil {
 		logger.Error("server failed", "error", err)
 		return exitFailure
 	}
 
 	return exitOK
+}
+
+func readAuthenticationConfig(stderr io.Writer) (authentication.Config, bool) {
+	keyID := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY_ID")
+	if keyID == "" {
+		keyID = "bootstrap-v1"
+	}
+	encodedKey := os.Getenv("OPEN_ASPM_TOKEN_VERIFIER_KEY")
+	key, err := base64.RawURLEncoding.DecodeString(encodedKey)
+	if err != nil || len(key) < 32 {
+		_, _ = fmt.Fprintln(stderr, "OPEN_ASPM_TOKEN_VERIFIER_KEY must be unpadded base64url encoding of at least 32 bytes")
+		return authentication.Config{}, false
+	}
+	return authentication.Config{
+		ActiveKeyID: keyID,
+		Keys:        map[string][]byte{keyID: key},
+	}, true
 }
 
 func writeUsage(output io.Writer) {
@@ -243,5 +276,6 @@ Commands:
   help      Show this help
 
 Run "open-aspm server --help" for server options.
-Set OPEN_ASPM_DATABASE_URL before running migration commands.`)
+Set OPEN_ASPM_DATABASE_URL before running database-backed commands.
+The server and bootstrap commands also require OPEN_ASPM_TOKEN_VERIFIER_KEY.`)
 }

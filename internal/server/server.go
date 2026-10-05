@@ -32,16 +32,21 @@ func DefaultConfig() Config {
 	}
 }
 
-// Run opens the configured listener and serves requests until the context is
-// cancelled or the server fails.
-func Run(ctx context.Context, config Config, logger *slog.Logger) error {
+// Run opens the configured listener and serves the supplied HTTP surface until
+// the context is cancelled or the server fails.
+func Run(
+	ctx context.Context,
+	config Config,
+	handler http.Handler,
+	logger *slog.Logger,
+) error {
 	listener, err := net.Listen("tcp", config.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", config.ListenAddress, err)
 	}
 
 	logger.Info("server listening", "address", listener.Addr().String())
-	return Serve(ctx, listener, NewHandler(), logger, config.ShutdownTimeout)
+	return Serve(ctx, listener, handler, logger, config.ShutdownTimeout)
 }
 
 // Serve runs the HTTP server on an existing listener. Accepting a listener
@@ -102,9 +107,16 @@ func Serve(
 // NewHandler returns the initial HTTP routing surface. Health endpoints reveal
 // no build, host, or dependency details.
 func NewHandler() http.Handler {
+	return newHandler(nil)
+}
+
+func newHandler(api *apiHandler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", health)
 	mux.HandleFunc("GET /health/ready", health)
+	if api != nil {
+		api.register(mux)
+	}
 
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Cache-Control", "no-store")
